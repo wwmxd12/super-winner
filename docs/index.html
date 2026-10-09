@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>贪吃蛇 Snake</title>
+<style>
+  /* 页面外壳：把画布居中，底色跟游戏里保持一致 */
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #0b0d0b;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    color: #9fb89a;
+    /* 手机上别让滑动页面把游戏滚走 */
+    overscroll-behavior: none;
+  }
+  canvas {
+    /* 逻辑尺寸永远是 500x500，这里只是把它"显示"成多大：
+       屏幕宽就用 500，屏幕窄（手机）就缩到 92% 宽，正方形比例不变 */
+    width: min(500px, 92vw);
+    height: min(500px, 92vw);
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, .6);
+    touch-action: none; /* 交给 JS 自己处理触摸，浏览器不要插手 */
+  }
+  .hint { margin-top: 14px; font-size: 13px; text-align: center; line-height: 1.7; }
+  .hint b { color: #cfe8c8; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<p class="hint">
+  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机直接<b>滑动</b>
+</p>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   这份代码是 GamePanel.java 的"网页孪生版"。
+   方法名、变量名、执行顺序都刻意跟 Java 那份一一对应，
+   方便你拿两边对照着读：看懂一个，就看懂了另一个。
+   ===================================================================== */
+
+// ============ 一、棋盘的物理设定（和 Java 版完全一样的四个数字）============
+const UNIT_SIZE  = 20;                        // 一个格子边长 20 像素
+const GAME_UNITS = 25;                        // 横竖各 25 个格子
+const PANEL_SIZE = UNIT_SIZE * GAME_UNITS;    // 所以画布是 500 x 500
+const DELAY      = 130;                       // 每隔 130 毫秒走一步（越小越快）
+
+// ============ 二、配色表：想换造型只改这里 ============
+const C = {
+  bgDark:    [14, 16, 14],   // 棋盘格深的那一格
+  bgLight:   [24, 28, 24],   // 棋盘格浅的那一格
+  head:      [126, 235, 96], // 蛇头：嫩绿
+  bodyMid:   [92, 210, 70],  // 身体浅绿条纹
+  bodyDark:  [46, 170, 32],  // 身体深绿条纹
+  apple:     [255, 88, 96],  // 苹果本体
+  appleShine:[255, 190, 195],// 苹果高光
+  leaf:      [126, 214, 96], // 苹果叶子
+  tongue:    [255, 120, 150],// 小舌头
+  pupil:     [40, 40, 40],   // 瞳孔
+};
+// 网页里"改一个颜色"比 Java 方便：不用 new，直接拿数组描述，用的时候再拼成字符串
+const rgb = (c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+
+// ============ 三、画布：相当于 Java 里那个 JPanel ============
+const canvas = document.getElementById("game");
+const g = canvas.getContext("2d");
+
+// 高分屏适配：笔记本/手机屏幕一个 CSS 像素可能对应 2~3 个真实像素点。
+// 把画布的"真实分辨率"放大 DPR 倍，再把笔整体缩放 DPR 倍，
+// 于是我们照样在 0~500 的坐标系里画画，但边缘不会糊。
+// （Java 版没有这一步，因为 Swing 的窗口本来就是原生分辨率。）
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+canvas.width  = PANEL_SIZE * DPR;
+canvas.height = PANEL_SIZE * DPR;
+g.scale(DPR, DPR);
+
+// 抗锯齿：Java 版要手动 setRenderingHint 打开，Canvas 是**默认就开着**的，白捡。
+
+// ============ 四、蛇和食物的数据 ============
+// Java 的 final int[] 长度固定，这里用两个等长数组，思路一模一样：
+// 下标 0 是蛇头，越往后越靠近蛇尾。
+const snakeX = new Array(GAME_UNITS * GAME_UNITS).fill(0);
+const snakeY = new Array(GAME_UNITS * GAME_UNITS).fill(0);
+
+let bodyParts   = 6;   // 蛇现在有几节
+let applesEaten = 0;   // 吃了几颗苹果 = 得分
+let appleX = 0;        // 苹果所在格子的左上角像素 x
+let appleY = 0;
+let direction = "R";   // 蛇头朝向：U 上 / D 下 / L 左 / R 右
+let running   = true;  // true = 进行中，false = 已晕/已暂停
+
+// 是不是触屏设备（手机/平板）。下面"晕过去"那行提示要拿它决定写"按空格"还是"点一下"，
+// 所以必须放在文件开头就算好 —— 谁在前面用，谁就得先声明。
+const isTouch = window.matchMedia("(pointer: coarse)").matches;
+
+// 最高分：Java 版关掉程序就忘了，网页版存进 localStorage，下次打开还在。
+// （浏览器不允许网页随便往你电脑写文件，但给了一小块"便签纸"存这种小数据。）
+const HS_KEY = "snake-high-score";
+let highScore = 0;
+try {
+  highScore = Number(localStorage.getItem(HS_KEY)) || 0;
+} catch (e) {
+  highScore = 0; // 极少数隐私模式下读写会报错，忽略即可，不影响玩
+}
+
+let timer = null; // 相当于 Java 里那个 Timer，null 表示闹钟没拧开
+
+// ============ 五、开局与投放苹果 ============
+
+/** 把一局的所有初始状态摆好 */
+function newGame() {
+  direction = "R";
+  bodyParts = 6;
+  applesEaten = 0;
+  running = true;
+
+  // 初始的蛇：横躺在左上角，占据 (5,5)、(4,5)、(3,5)... 头在最右边
+  for (let i = 0; i < bodyParts; i++) {
+    snakeX[i] = (5 - i) * UNIT_SIZE;
+    snakeY[i] = 5 * UNIT_SIZE;
+  }
+  newApple();
+}
+
+/** 在棋盘上随机扔一颗苹果，且不能扔到蛇身上 */
+function newApple() {
+  while (true) {
+    appleX = Math.floor(Math.random() * GAME_UNITS) * UNIT_SIZE;
+    appleY = Math.floor(Math.random() * GAME_UNITS) * UNIT_SIZE;
+
+    let onSnake = false;
+    for (let i = 0; i < bodyParts; i++) {
+      if (snakeX[i] === appleX && snakeY[i] === appleY) {
+        onSnake = true;
+        break;
+      }
+    }
+    if (!onSnake) return; // 位置干净，苹果放下
+  }
+}
+
+// ============ 六、闹钟响了就走这一步（游戏循环）============
+
+/** 对应 Java 的 actionPerformed：走一步，然后重画一帧 */
+function tick() {
+  if (running) move();
+  draw();
+}
+
+function startTimer() {
+  stopTimer();
+  timer = setInterval(tick, DELAY); // 相当于 new Timer(DELAY, this) + timer.start()
+}
+
+function stopTimer() {
+  if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
+/** 核心：让蛇往前挪一格（这段逻辑和 Java 版逐行对应）*/
+function move() {
+  // 【第 1 步】身体依次前移
+  for (let i = bodyParts; i > 0; i--) {
+    snakeX[i] = snakeX[i - 1];
+    snakeY[i] = snakeY[i - 1];
+  }
+
+  // 【第 2 步】单独算蛇头的新位置
+  switch (direction) {
+    case "U": snakeY[0] -= UNIT_SIZE; break;
+    case "D": snakeY[0] += UNIT_SIZE; break;
+    case "L": snakeX[0] -= UNIT_SIZE; break;
+    case "R": snakeX[0] += UNIT_SIZE; break;
+  }
+
+  // 【第 3 步】吃到苹果了吗？吃到就把尾巴"还回来"，蛇变长一节
+  if (snakeX[0] === appleX && snakeY[0] === appleY) {
+    bodyParts++;
+    applesEaten++;
+    newApple();
+  }
+
+  // 【第 4 步】撞墙或撞自己？
+  checkCollisions();
+}
+
+function checkCollisions() {
+  // 情况 A：蛇头撞到四条边框
+  if (snakeX[0] < 0 || snakeX[0] >= PANEL_SIZE ||
+      snakeY[0] < 0 || snakeY[0] >= PANEL_SIZE) {
+    running = false;
+  }
+
+  // 情况 B：蛇头撞到自己身上（从 1 开始，不能跟自己撞）
+  for (let i = 1; i < bodyParts; i++) {
+    if (snakeX[i] === snakeX[0] && snakeY[i] === snakeY[0]) {
+      running = false;
+    }
+  }
+
+  if (!running) {
+    stopTimer(); // 死了就关掉闹钟
+    if (applesEaten > highScore) {
+      highScore = applesEaten;
+      try { localStorage.setItem(HS_KEY, String(highScore)); } catch (e) { /* 存不进去就算了 */ }
+    }
+    // 这里不用自己重画：回到 tick() 后紧跟着就有一次 draw()，画面自然会定格在"晕过去"
+  }
+}
+
+// ============ 七、把当前状态画到屏幕上 ============
+
+/** 小工具：画实心椭圆。参数含义跟 Java 的 fillOval 完全一致（x,y 是左上角）*/
+function fillOval(x, y, w, h) {
+  g.beginPath();
+  g.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+  g.fill();
+}
+
+/** 小工具：画实心圆角矩形，对应 Java 的 fillRoundRect。
+    Canvas 其实有现成的 roundRect()，但老浏览器没有，所以自己用 arcTo 兜一圈更保险。*/
+function fillRoundRect(x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2); // 圆角不能比半边还大，否则画不出来
+  g.beginPath();
+  g.moveTo(x + rr, y);
+  g.arcTo(x + w, y,     x + w, y + h, rr);
+  g.arcTo(x + w, y + h, x,     y + h, rr);
+  g.arcTo(x,     y + h, x,     y,     rr);
+  g.arcTo(x,     y,     x + w, y,     rr);
+  g.closePath();
+  g.fill();
+}
+
+/** 一帧画面的总调度：从最底层往上涂 */
+function draw() {
+  drawBoard();
+
+  if (!running) {
+    // 死了：先蒙一层半透明的黑纱，蛇和字再画在纱上面，就不会变暗
+    g.fillStyle = "rgba(0, 0, 0, 0.59)";
+    g.fillRect(0, 0, PANEL_SIZE, PANEL_SIZE);
+  }
+
+  drawApple();
+  drawSnake(running);
+
+  if (running) drawScore();
+  else gameOver();
+}
+
+/** 背景：若隐若现的棋盘格 */
+function drawBoard() {
+  for (let row = 0; row < GAME_UNITS; row++) {
+    for (let col = 0; col < GAME_UNITS; col++) {
+      g.fillStyle = rgb(((row + col) % 2 === 0) ? C.bgDark : C.bgLight);
+      g.fillRect(col * UNIT_SIZE, row * UNIT_SIZE, UNIT_SIZE, UNIT_SIZE);
+    }
+  }
+}
+
+/** 苹果：圆果子 + 亮晶晶的高光 + 头顶一片小叶子 */
+function drawApple() {
+  const x = appleX;
+  const y = appleY;
+
+  g.fillStyle = rgb(C.apple);
+  g.fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
+
+  g.fillStyle = rgb(C.appleShine);
+  g.fillOval(x + 4, y + 6, 4, 3);
+
+  g.fillStyle = rgb(C.leaf);
+  g.fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
+}
+
+/** 蛇：一节一节圆滚滚的"扭扭糖" */
+function drawSnake(alive) {
+  // ---- 身体：从尾巴往蛇头画，深绿浅绿隔节相间 ----
+  for (let i = bodyParts - 1; i >= 1; i--) {
+    g.fillStyle = rgb((i % 2 === 0) ? C.bodyMid : C.bodyDark);
+    // 每节向内缩 1 像素，节与节之间留一道缝；尾巴那节多缩几像素，收出小尖
+    const pad = (i === bodyParts - 1) ? 5 : 1;
+    fillRoundRect(snakeX[i] + pad, snakeY[i] + pad,
+                  UNIT_SIZE - pad * 2, UNIT_SIZE - pad * 2, 12);
+  }
+
+  // ---- 蛇头：比身体大一圈 ----
+  const hx = snakeX[0];
+  const hy = snakeY[0];
+  g.fillStyle = rgb(C.head);
+  fillRoundRect(hx - 1, hy - 1, UNIT_SIZE + 2, UNIT_SIZE + 2, 14);
+
+  drawFace(hx, hy, alive);
+}
+
+/**
+ * 蛇头的表情。两个"方向向量"管住四个朝向：
+ *   forward(fx, fy) = 脸正前方；side(sx, sy) = 左右分眼，永远和 forward 垂直
+ * 换方向只是把向量里的 1 换成 -1，一套公式通吃。
+ */
+function drawFace(hx, hy, alive) {
+  let fx = 0, fy = 0;
+  let sx = 0, sy = 0;
+  switch (direction) {
+    case "U": fy = -1; sx = 1; break; // 朝上：两只眼左右排
+    case "D": fy =  1; sx = 1; break;
+    case "L": fx = -1; sy = 1; break; // 朝左：两只眼上下排
+    case "R": fx =  1; sy = 1; break;
+  }
+
+  const cx = hx + UNIT_SIZE / 2; // 蛇头中心，所有五官都拿它当基准
+  const cy = hy + UNIT_SIZE / 2;
+
+  g.lineCap = "round"; // 线条两头修成圆的，不显生硬
+
+  for (let side = -1; side <= 1; side += 2) { // -1 = 左眼，+1 = 右眼
+    const ex = cx + fx * 3 + sx * 4 * side;
+    const ey = cy + fy * 3 + sy * 4 * side;
+
+    if (alive) {
+      g.fillStyle = "#fff";
+      fillOval(ex - 3, ey - 3, 6, 6);
+      g.fillStyle = rgb(C.pupil);            // 瞳孔往前挪 1 像素 = 眼神盯着要去的方向
+      fillOval(ex - 2 + fx, ey - 2 + fy, 4, 4);
+    } else {
+      g.strokeStyle = "#fff";                // 晕过去了：两个 X 当眼睛
+      g.lineWidth = 1.6;
+      g.beginPath();
+      g.moveTo(ex - 3, ey - 3); g.lineTo(ex + 3, ey + 3);
+      g.moveTo(ex + 3, ey - 3); g.lineTo(ex - 3, ey + 3);
+      g.stroke();
+    }
+  }
+
+  if (!alive) return; // 晕过去的时候舌头就收起来，不吐了
+
+  // 小舌头：从嘴边伸出去，末端分个叉
+  g.strokeStyle = rgb(C.tongue);
+  g.lineWidth = 2;
+  const mx = cx + fx * 10, my = cy + fy * 10; // 舌头根
+  const tx = cx + fx * 16, ty = cy + fy * 16; // 舌头尖
+  g.beginPath();
+  g.moveTo(mx, my); g.lineTo(tx, ty);
+  g.moveTo(tx, ty); g.lineTo(tx + fx * 3 + sx * 2, ty + fy * 3 + sy * 2);
+  g.moveTo(tx, ty); g.lineTo(tx + fx * 3 - sx * 2, ty + fy * 3 - sy * 2);
+  g.stroke();
+}
+
+/** 左下角得分、右下角最高分。
+    注意：Canvas 的 fillText 和 Java 的 drawString 一样，y 给的是"文字的基线"而不是顶边，
+    所以这些坐标可以从 Java 版直接抄过来，不用重算。 */
+function drawScore() {
+  g.fillStyle = "#fff";
+  g.font = "bold 16px 'Microsoft YaHei', sans-serif";
+  g.textAlign = "left";
+  g.fillText("得分 " + applesEaten, UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
+
+  g.textAlign = "right"; // 网页里"靠右对齐"是个现成开关，不用像 Java 那样自己量字宽
+  g.fillText("最高分 " + highScore, PANEL_SIZE - UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
+}
+
+function gameOver() {
+  g.textAlign = "center"; // 居中也是现成开关：x 直接给面板中线就行
+  const mid = PANEL_SIZE / 2;
+
+  g.fillStyle = "rgb(255, 180, 110)";
+  g.font = "bold 32px 'Microsoft YaHei', sans-serif";
+  g.fillText("蛇蛇晕过去了", mid, mid - 40);
+
+  g.fillStyle = "#fff";
+  g.font = "18px 'Microsoft YaHei', sans-serif";
+  g.fillText("本局得分 " + applesEaten, mid, mid + 5);
+
+  g.fillStyle = "rgb(180, 255, 170)";
+  g.fillText(isTouch ? "点一下屏幕再来一次" : "按空格键再来一次", mid, mid + 35);
+}
+
+// ============ 八、键盘：把"按了哪个键"翻译成"蛇该往哪走" ============
+
+// 只允许"垂直方向"的按键立刻生效 —— 禁止 180 度掉头，否则蛇头会撞进自己脖子。
+function turn(to) {
+  const opposite = { U: "D", D: "U", L: "R", R: "L" };
+  if (direction !== to && direction !== opposite[to]) {
+    direction = to;
+  }
+}
+
+const KEY_MAP = {
+  ArrowLeft: "L", KeyA: "L",
+  ArrowRight: "R", KeyD: "R",
+  ArrowUp: "U", KeyW: "U",
+  ArrowDown: "D", KeyS: "D",
+};
+
+document.addEventListener("keydown", (e) => {
+  // 方向键和空格在网页里默认会"滚动页面"，必须按住它，不然一按蛇没动、页面先跑了
+  if (e.code === "Space" || e.code.startsWith("Arrow")) {
+    e.preventDefault();
+  }
+
+  if (!running) {
+    if (e.code === "Space") {
+      newGame();
+      startTimer();
+    }
+    return;
+  }
+
+  const dir = KEY_MAP[e.code];
+  if (dir) turn(dir);
+});
+
+// ============ 九、触屏：手机上滑一下就算转向 ============
+
+let touchStartX = 0;
+let touchStartY = 0;
+
+canvas.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  touchStartX = e.changedTouches[0].clientX;
+  touchStartY = e.changedTouches[0].clientY;
+}, { passive: false });
+
+canvas.addEventListener("touchend", (e) => {
+  e.preventDefault();
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  const dy = e.changedTouches[0].clientY - touchStartY;
+
+  if (!running) {           // 晕了的时候，点一下就重开
+    newGame();
+    startTimer();
+    return;
+  }
+
+  // 滑动距离太短就当"手抖"，不算指令
+  if (Math.abs(dx) < 20 && Math.abs(dy) < 20) return;
+
+  // 哪个方向挪得多就听哪个的：横向大 → 左右，纵向大 → 上下
+  if (Math.abs(dx) > Math.abs(dy)) {
+    turn(dx > 0 ? "R" : "L");
+  } else {
+    turn(dy > 0 ? "D" : "U");
+  }
+}, { passive: false });
+
+// ============ 十、切到别的标签页就自动暂停 ============
+
+// 浏览器会把后台标签页的定时器拖慢到每秒一次。不处理的话，你切出去回个消息，
+// 回来发现蛇已经自己撞墙了 —— 这里在看不见时停钟，回来再续上。
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopTimer();
+  } else if (running) {
+    startTimer();
+  }
+});
+
+// ============ 点火 ============
+newGame();
+draw();        // 先画一帧，免得白屏等第一个 130 毫秒
+startTimer();
+</script>
+
+</body>
+</html>
