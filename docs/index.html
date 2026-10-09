@@ -39,7 +39,9 @@
 <canvas id="game"></canvas>
 
 <p class="hint">
-  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机直接<b>滑动</b>
+  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机直接<b>滑动</b><br>
+  灰黑那条是<b>电脑蛇</b>，跟你抢苹果、撞墙撞身子都会晕；<br>
+  它晕了会把吃过的苹果撒回自己身上，<b>5 秒</b>后重新上场
 </p>
 <p id="fps">读数初始化中…</p>
 
@@ -58,18 +60,33 @@ const GAME_UNITS = 25;                        // 横竖各 25 个格子
 const PANEL_SIZE = UNIT_SIZE * GAME_UNITS;    // 所以画布是 500 x 500
 const DELAY      = 130;                       // 每隔 130 毫秒走一步（越小越快）
 
+// 下面三个是加了电脑蛇之后的"规则数字"，想调难度只改这里
+const START_PARTS = 6;      // 开局几节身体：玩家和电脑一模一样
+const RESPAWN_MS  = 5000;   // 电脑蛇死后隔多少毫秒复活
+const MAX_APPLES  = 12;     // 棋盘上同时最多几颗苹果（防止电脑反复死把盘子堆满）
+
 // ============ 二、配色表：想换造型只改这里 ============
 const C = {
   bgDark:    [14, 16, 14],   // 棋盘格深的那一格
   bgLight:   [24, 28, 24],   // 棋盘格浅的那一格
-  head:      [126, 235, 96], // 蛇头：嫩绿
-  bodyMid:   [92, 210, 70],  // 身体浅绿条纹
-  bodyDark:  [46, 170, 32],  // 身体深绿条纹
   apple:     [255, 88, 96],  // 苹果本体
   appleShine:[255, 190, 195],// 苹果高光
   leaf:      [126, 214, 96], // 苹果叶子
-  tongue:    [255, 120, 150],// 小舌头
+  eyeWhite:  [255, 255, 255],// 眼白
   pupil:     [40, 40, 40],   // 瞳孔
+};
+
+// 每条蛇一套配色。画身体的代码只写一遍，颜色由传进去的这套决定，
+// 所以"给电脑蛇换个颜色"= 只改下面其中一行。
+const PAL_P = {             // 玩家：嫩绿
+  head: [126, 235, 96], bodyMid: [92, 210, 70], bodyDark: [46, 170, 32],
+  tongue: [255, 120, 150],
+};
+const PAL_E = {             // 电脑：灰黑
+  // 注意别真用纯黑：底色本来就是近黑的深绿，纯黑蛇会糊成一片看不见。
+  // 用"银灰 → 炭灰"这一档，既是你说的灰黑，又跟背景分得开。
+  head: [178, 186, 194], bodyMid: [120, 128, 137], bodyDark: [72, 78, 86],
+  tongue: [206, 96, 112],
 };
 // 网页里"改一个颜色"比 Java 方便：不用 new，直接拿数组描述，用的时候再拼成字符串
 const rgb = (c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
@@ -89,18 +106,40 @@ g.scale(DPR, DPR);
 
 // 抗锯齿：Java 版要手动 setRenderingHint 打开，Canvas 是**默认就开着**的，白捡。
 
-// ============ 四、蛇和食物的数据 ============
-// Java 的 final int[] 长度固定，这里用两个等长数组，思路一模一样：
-// 下标 0 是蛇头，越往后越靠近蛇尾。
-const snakeX = new Array(GAME_UNITS * GAME_UNITS).fill(0);
-const snakeY = new Array(GAME_UNITS * GAME_UNITS).fill(0);
+// ============ 四、两条蛇的数据 ============
+// 原来只有一个玩家，变量直接摊在外面（snakeX / bodyParts / …）。
+// 现在加了电脑蛇，就把它打包成一个对象：两条蛇形状完全相同，
+// 于是"移动 / 撞墙 / 吃苹果 / 画身体"这些代码只写一遍，两条蛇共用。
+function makeSnake(pal, name) {
+  const N = GAME_UNITS * GAME_UNITS;
+  return {
+    x: new Array(N).fill(0),   // 每节的格坐标（存的是像素值，都是 20 的整数倍）
+    y: new Array(N).fill(0),
+    px: new Array(N).fill(0),  // 【丝滑的关键】上一步的格坐标快照，插值用
+    py: new Array(N).fill(0),
+    parts: START_PARTS,        // 现在有几节
+    score: 0,                  // 吃了几颗苹果 = 得分
+    dir: "R",                  // 蛇头朝向：U 上 / D 下 / L 左 / R 右
+    alive: true,               // 活着吗
+    respawnAt: 0,              // 死了的话，游戏时间到多少毫秒复活
+    pal: pal,
+    name: name,
+  };
+}
 
-let bodyParts   = 6;   // 蛇现在有几节
-let applesEaten = 0;   // 吃了几颗苹果 = 得分
-let appleX = 0;        // 苹果所在格子的左上角像素 x
-let appleY = 0;
-let direction = "R";   // 蛇头朝向：U 上 / D 下 / L 左 / R 右
-let running   = true;  // true = 进行中，false = 已晕/已暂停
+const P = makeSnake(PAL_P, "玩家");   // 你
+const E = makeSnake(PAL_E, "电脑");   // 对手：长度、速度、起步节数跟 P 一模一样
+
+// 四个朝向对应的"每走一步偏移几格"：[dx, dy]。
+// 有了这张表，前进、算 AI 候选格、画五官共用一套，不用写四套 if。
+const DIRV = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0] };
+const BACK = { U: "D", D: "U", L: "R", R: "L" };   // 反方向，用来禁止 180 度掉头
+
+const rnd = (n) => Math.floor(Math.random() * n);    // 0 ~ n-1 的随机整数
+
+// 苹果从"一个坐标"改成"一份清单"：电脑蛇死的时候要把吃掉的苹果撒回躯体上，
+// 盘子上就可能同时躺着好几颗，所以必须用数组才装得下。
+const apples = [];             // 每个元素是 { x, y }，苹果所在格子的左上角像素坐标
 
 // 是不是触屏设备（手机/平板）。下面"晕过去"那行提示要拿它决定写"按空格"还是"点一下"，
 // 所以必须放在文件开头就算好 —— 谁在前面用，谁就得先声明。
@@ -116,67 +155,118 @@ try {
   highScore = 0; // 极少数隐私模式下读写会报错，忽略即可，不影响玩
 }
 
-// 【丝滑的关键】上一帧的"格子坐标"快照。
-// 逻辑照旧一格一格跳，但渲染时拿它和当前坐标做"插值"，蛇就滑起来了。
-const prevX = new Array(GAME_UNITS * GAME_UNITS).fill(0);
-const prevY = new Array(GAME_UNITS * GAME_UNITS).fill(0);
-
 // ---- 循环状态 ----
 let rafId = null;      // requestAnimationFrame 的编号，null = 循环没在跑
 let lastFrame = 0;     // 上一帧的时间戳
 let acc = 0;           // 当前这一步已经攒了多少毫秒（0 ~ DELAY）
 let nowMs = 0;         // 本帧的绝对时间，给舌头那种"按秒呼吸"的小动画用
+let gameMs = 0;        // 本局已经玩了多久。复活倒计时用它而不是 nowMs：
+                       // 切走标签页时循环会停、gameMs 也跟着停，
+                       // 不会出现"离开五分钟、回来电脑蛇早就复活了"
 
 // ============ 五、开局与投放苹果 ============
 
-/** 把一局的所有初始状态摆好 */
-function newGame() {
-  direction = "R";
-  bodyParts = 6;
-  applesEaten = 0;
-  running = true;
-
-  // 初始的蛇：横躺在左上角，占据 (5,5)、(4,5)、(3,5)... 头在最右边
-  for (let i = 0; i < bodyParts; i++) {
-    snakeX[i] = (5 - i) * UNIT_SIZE;
-    snakeY[i] = 5 * UNIT_SIZE;
+/** 摆一条蛇：头在 (headCol, row)，身体沿"朝向的反方向"往后排 */
+function placeSnake(s, headCol, row) {
+  const back = s.dir === "R" ? -1 : 1;   // 朝右身体排在左边，朝左身体排在右边
+  for (let i = 0; i < s.parts; i++) {
+    s.x[i] = (headCol + back * i) * UNIT_SIZE;
+    s.y[i] = row * UNIT_SIZE;
   }
-  syncPrev();  // 开局时"上一步"和"这一步"重合，蛇不会自己飘
-  newApple();
 }
 
-/** 在棋盘上随机扔一颗苹果，且不能扔到蛇身上 */
-function newApple() {
-  while (true) {
-    appleX = Math.floor(Math.random() * GAME_UNITS) * UNIT_SIZE;
-    appleY = Math.floor(Math.random() * GAME_UNITS) * UNIT_SIZE;
+/** 把一条蛇重置成开局状态 */
+function resetSnake(s, dir, headCol, row) {
+  s.dir = dir;
+  s.parts = START_PARTS;
+  s.score = 0;
+  s.alive = true;
+  s.respawnAt = 0;
+  placeSnake(s, headCol, row);
+  syncPrev(s);   // 开局时"上一步"和"这一步"重合，蛇不会自己飘
+}
 
-    let onSnake = false;
-    for (let i = 0; i < bodyParts; i++) {
-      if (snakeX[i] === appleX && snakeY[i] === appleY) {
-        onSnake = true;
-        break;
-      }
+/** 把一局的所有初始状态摆好 */
+function newGame() {
+  apples.length = 0;
+  gameMs = 0;
+
+  // 玩家：左上角，头朝右
+  resetSnake(P, "R", 5, 5);
+  // 电脑：右下角，头朝左 —— 开局离你最远，不会一上来就贴脸
+  resetSnake(E, "L", GAME_UNITS - START_PARTS, GAME_UNITS - 6);
+
+  spawnApple();
+}
+
+/** 这个格子上有没有活蛇的身体（死蛇不算，它已经不存在了） */
+function cellBusy(x, y) {
+  for (const s of [P, E]) {
+    if (!s.alive) continue;
+    for (let i = 0; i < s.parts; i++) {
+      if (s.x[i] === x && s.y[i] === y) return true;
     }
-    if (!onSnake) return; // 位置干净，苹果放下
+  }
+  return false;
+}
+
+/** 苹果清单里 (x,y) 这一格是第几颗；没有就返回 -1 */
+function appleIndexAt(x, y) {
+  for (let i = 0; i < apples.length; i++) {
+    if (apples[i].x === x && apples[i].y === y) return i;
+  }
+  return -1;
+}
+
+/** 在棋盘上随机扔一颗苹果：落到蛇身上或已有苹果的地方就重扔 */
+function spawnApple() {
+  if (apples.length >= MAX_APPLES) return;   // 堆满了就不再补，不然能刷满一盘
+  for (let tries = 0; tries < 400; tries++) {
+    const x = rnd(GAME_UNITS) * UNIT_SIZE;
+    const y = rnd(GAME_UNITS) * UNIT_SIZE;
+    if (!cellBusy(x, y) && appleIndexAt(x, y) < 0) {
+      apples.push({ x: x, y: y });
+      return;
+    }
   }
 }
 
 // ============ 六、游戏循环：逻辑走格子，画面按秒滑 ============
 
 /** 把"当前格坐标"复制一份当作"上一步的格坐标"，插值才有起点。
-    注意多抄一格（i <= bodyParts）：move() 会往那个空位里写东西。 */
-function syncPrev() {
-  for (let i = 0; i <= bodyParts; i++) {
-    prevX[i] = snakeX[i];
-    prevY[i] = snakeY[i];
+    注意多抄一格（i <= parts）：advance() 会往那个空位里写东西。 */
+function syncPrev(s) {
+  for (let i = 0; i <= s.parts; i++) {
+    s.px[i] = s.x[i];
+    s.py[i] = s.y[i];
   }
 }
 
-/** 走一格：先记下起点，再动 */
+/**
+ * 走一格。两条蛇是"同时"动的，所以顺序很讲究：
+ * 先各自记起点 → 电脑想一想往哪走 → 两条蛇同时挪 → 再统一判撞 → 最后各自认领苹果。
+ * 如果让玩家先挪完、先判撞、先吃苹果，电脑就永远慢半拍，抢不过你。
+ */
 function step() {
-  syncPrev();
-  move();
+  syncPrev(P);
+  if (E.alive) syncPrev(E);
+
+  aiThink();
+
+  advance(P);
+  if (E.alive) advance(E);
+
+  // 两条蛇都落位之后再统一判撞，谁也不占先后便宜。
+  // 头对头必须排在最前面判：它要的是"两个一起死"。放在后面的话，
+  // 先被检查的那条会先因为"撞进对方身体"单独死掉，另一条反而白捡一条命。
+  checkHeadToHead();
+  checkCollision(P);
+  if (E.alive) checkCollision(E);
+
+  eatApples();
+
+  if (apples.length === 0) spawnApple();
+  tryRespawn();
 }
 
 /** 启动画面循环 */
@@ -232,80 +322,218 @@ function loop(now) {
   const dt = Math.min(now - lastFrame, 100);
   lastFrame = now;
 
-  if (running) {
+  if (P.alive) {
+    gameMs += dt;          // 本局计时：电脑蛇的复活倒计时看它
     acc += dt;
     // 攒够一个 DELAY 就走一格；一次循环里可能要走好几格（掉帧时自动补上）
-    while (acc >= DELAY && running) {
+    while (acc >= DELAY && P.alive) {
       acc -= DELAY;
       step();
     }
   } else {
-    // 已经晕了：不再走格子，但让最后那一步滑到底再定格
+    // 你已经晕了：这一局结束，不再走格子，只让最后那一步滑到底再定格
     acc = Math.min(acc + dt, DELAY);
   }
 
   draw();
 
   // 游戏结束后，等最后一步滑完就彻底停掉循环，不空转费电
-  if (running || acc < DELAY) {
+  if (P.alive || acc < DELAY) {
     rafId = requestAnimationFrame(loop);
   } else {
     rafId = null;
   }
 }
 
-/** 核心：让蛇往前挪一格（这段逻辑和 Java 版逐行对应）*/
-function move() {
+/** 核心：让一条蛇往前挪一格（这段逻辑和 Java 版逐行对应）*/
+function advance(s) {
   // 【第 1 步】身体依次前移
-  for (let i = bodyParts; i > 0; i--) {
-    snakeX[i] = snakeX[i - 1];
-    snakeY[i] = snakeY[i - 1];
+  for (let i = s.parts; i > 0; i--) {
+    s.x[i] = s.x[i - 1];
+    s.y[i] = s.y[i - 1];
   }
 
-  // 【第 2 步】单独算蛇头的新位置
-  switch (direction) {
-    case "U": snakeY[0] -= UNIT_SIZE; break;
-    case "D": snakeY[0] += UNIT_SIZE; break;
-    case "L": snakeX[0] -= UNIT_SIZE; break;
-    case "R": snakeX[0] += UNIT_SIZE; break;
-  }
-
-  // 【第 3 步】吃到苹果了吗？吃到就把尾巴"还回来"，蛇变长一节
-  if (snakeX[0] === appleX && snakeY[0] === appleY) {
-    bodyParts++;
-    // 新长出来的那一节，"上一步位"就当作和"这一步位"相同：
-    // 不填这句，它会从数组里残留的旧坐标"飞"过来，看着像抽风。
-    // （物理上也是对的：蛇长大时，尾巴那一节是站在原地不动的。）
-    prevX[bodyParts - 1] = snakeX[bodyParts - 1];
-    prevY[bodyParts - 1] = snakeY[bodyParts - 1];
-    applesEaten++;
-    newApple();
-  }
-
-  // 【第 4 步】撞墙或撞自己？
-  checkCollisions();
+  // 【第 2 步】单独算蛇头的新位置（拿上面那张方向向量表，不写 switch）
+  const d = DIRV[s.dir];
+  s.x[0] += d[0] * UNIT_SIZE;
+  s.y[0] += d[1] * UNIT_SIZE;
 }
 
-function checkCollisions() {
+/** 撞墙 / 撞自己 / 撞对方。判定只看离散的格子坐标，绝不用插值后的画面坐标 */
+function checkCollision(s) {
+  const hx = s.x[0], hy = s.y[0];
+
   // 情况 A：蛇头撞到四条边框
-  if (snakeX[0] < 0 || snakeX[0] >= PANEL_SIZE ||
-      snakeY[0] < 0 || snakeY[0] >= PANEL_SIZE) {
-    running = false;
-  }
+  if (hx < 0 || hx >= PANEL_SIZE || hy < 0 || hy >= PANEL_SIZE) { kill(s); return; }
 
   // 情况 B：蛇头撞到自己身上（从 1 开始，不能跟自己撞）
-  for (let i = 1; i < bodyParts; i++) {
-    if (snakeX[i] === snakeX[0] && snakeY[i] === snakeY[0]) {
-      running = false;
-    }
+  for (let i = 1; i < s.parts; i++) {
+    if (s.x[i] === hx && s.y[i] === hy) { kill(s); return; }
   }
 
-  if (!running && applesEaten > highScore) {
-    highScore = applesEaten;
+  // 情况 C：撞进对方身体。两条蛇互相当墙，否则身体会叠在一起看不清谁是谁
+  const other = s === P ? E : P;
+  if (other.alive) {
+    for (let i = 0; i < other.parts; i++) {
+      if (other.x[i] === hx && other.y[i] === hy) { kill(s); return; }
+    }
+  }
+}
+
+/** 头对头：撞进同一格，或者一步之内互相穿过去，两个都不活 */
+function checkHeadToHead() {
+  if (!P.alive || !E.alive) return;
+  const sameCell = P.x[0] === E.x[0] && P.y[0] === E.y[0];
+  const swapped  = P.x[0] === E.px[0] && P.y[0] === E.py[0]
+                && E.x[0] === P.px[0] && E.y[0] === P.py[0];
+  if (sameCell || swapped) { kill(P); kill(E); }
+}
+
+/** 让一条蛇晕过去。已经晕了的不重复处理，免得苹果撒两遍、最高分存两遍 */
+function kill(s) {
+  if (!s.alive) return;
+  s.alive = false;
+
+  if (s === E) {
+    // 电脑蛇：把吃掉的苹果撒回躯体上，并排一个复活时间点
+    dropApplesOnBody(E);
+    E.respawnAt = gameMs + RESPAWN_MS;
+  } else if (P.score > highScore) {
+    // 玩家：这一局结束，刷新最高分
+    highScore = P.score;
     try { localStorage.setItem(HS_KEY, String(highScore)); } catch (e) { /* 存不进去就算了 */ }
   }
   // 注意：这里**不能**停掉循环。还得靠它把"最后一步滑到墙边"和淡入的黑纱画完，
   // loop() 自己会在滑完之后停下来。
+}
+
+/** 电脑蛇晕了：把它吃掉的每一颗苹果，随机还回它躯体占过的格子上 */
+function dropApplesOnBody(s) {
+  const cells = [];
+  for (let i = 0; i < s.parts; i++) cells.push({ x: s.x[i], y: s.y[i] });
+
+  // 洗牌（Fisher-Yates）：从躯体里随机挑格子，而不是固定从蛇头那头往下拿
+  for (let i = cells.length - 1; i > 0; i--) {
+    const j = rnd(i + 1);
+    const tmp = cells[i]; cells[i] = cells[j]; cells[j] = tmp;
+  }
+
+  let n = s.score;                        // 吃掉几颗就撒几颗
+  for (const c of cells) {
+    if (n <= 0 || apples.length >= MAX_APPLES) break;
+    // 撞墙死的时候蛇头那一节是在棋盘外（x 可能是 500 或 -20），
+    // 不排掉的话苹果会被撒到屏幕看不见的位置，永远吃不到。
+    if (c.x < 0 || c.x >= PANEL_SIZE || c.y < 0 || c.y >= PANEL_SIZE) continue;
+    if (cellBusy(c.x, c.y)) continue;             // 落在活蛇身上就换下一格
+    if (appleIndexAt(c.x, c.y) >= 0) continue;    // 同一格不放两颗
+    apples.push(c);
+    n--;
+  }
+}
+
+/** 两条蛇各自认领：蛇头停在有苹果的格子上就吃掉、变长一节 */
+function eatApples() {
+  for (const s of [P, E]) {
+    if (!s.alive) continue;
+    const ai = appleIndexAt(s.x[0], s.y[0]);
+    if (ai < 0) continue;
+    apples.splice(ai, 1);
+    s.parts++;
+    // 新长出来的那一节，"上一步位"就当作和"这一步位"相同：
+    // 不填这句，它会从数组里残留的旧坐标"飞"过来，看着像抽风。
+    // （物理上也是对的：蛇长大时，尾巴那一节是站在原地不动的。）
+    s.px[s.parts - 1] = s.x[s.parts - 1];
+    s.py[s.parts - 1] = s.y[s.parts - 1];
+    s.score++;
+  }
+}
+
+/** 到点就把电脑蛇放回棋盘 */
+function tryRespawn() {
+  if (E.alive || gameMs < E.respawnAt) return;
+  if (!respawnEnemy()) E.respawnAt = gameMs + 1000;   // 塞不下，一秒后再试
+}
+
+/** 在棋盘上找一个能放下整条蛇的空位。找到就复活并返回 true */
+function respawnEnemy() {
+  E.dir = "R";
+  for (let tries = 0; tries < 80; tries++) {
+    const row = rnd(GAME_UNITS);
+    // 头所在的列至少要从 START_PARTS-1 起，否则身体会排到棋盘外面
+    const col = (START_PARTS - 1) + rnd(GAME_UNITS - (START_PARTS - 1));
+    let ok = true;
+    for (let i = 0; i < START_PARTS; i++) {
+      const x = (col - i) * UNIT_SIZE, y = row * UNIT_SIZE;
+      if (cellBusy(x, y) || appleIndexAt(x, y) >= 0) { ok = false; break; }
+    }
+    // 不能贴着脸复活：那样你根本来不及反应，白白撞死在它身上。
+    // 蛇头至少离玩家蛇头三个格子远。
+    if (ok && P.alive) {
+      const gap = Math.abs(col * UNIT_SIZE - P.x[0]) + Math.abs(row * UNIT_SIZE - P.y[0]);
+      if (gap < 3 * UNIT_SIZE) ok = false;
+    }
+    if (!ok) continue;
+    E.parts = START_PARTS;
+    E.score = 0;
+    E.alive = true;
+    placeSnake(E, col, row);
+    syncPrev(E);
+    return true;
+  }
+  return false;
+}
+
+// ---------------- 电脑蛇的脑子：很笨但够用的贪心 ----------------
+
+/** 这个格子对 s 来说是不是一步就死：出界、撞自己、撞对方 */
+function cellIsDeadly(x, y, s) {
+  if (x < 0 || x >= PANEL_SIZE || y < 0 || y >= PANEL_SIZE) return true;
+  for (let i = 1; i < s.parts; i++) {
+    if (s.x[i] === x && s.y[i] === y) return true;
+  }
+  const other = s === P ? E : P;
+  if (other.alive) {
+    for (let i = 0; i < other.parts; i++) {
+      if (other.x[i] === x && other.y[i] === y) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 电脑蛇每一步想一次：哪颗苹果离我最近，就往能缩短距离的方向走；
+ * 但先排掉"一步就死"的方向。如果四个方向全都会死，就挑离苹果最近的那个
+ * —— 反正要死，而且它死在哪里，哪里就会下苹果雨，那正是你要的东西。
+ */
+function aiThink() {
+  if (!E.alive || apples.length === 0) return;   // 没苹果就懒得动，保持原方向
+
+  // 1. 找离蛇头最近的一颗苹果（曼哈顿距离：横竖各好几格相加）
+  let target = null, targetD = Infinity;
+  for (const a of apples) {
+    const d = Math.abs(a.x - E.x[0]) + Math.abs(a.y - E.y[0]);
+    if (d < targetD) { targetD = d; target = a; }
+  }
+
+  // 2. 四个方向里，先排掉 180 度掉头
+  const cands = [];
+  for (const k in DIRV) {
+    if (k !== BACK[E.dir]) cands.push(k);
+  }
+
+  // 3. 在候选里选"离苹果最近、且不会一步就死"的那个
+  let safest = null,  safestRank  = Infinity;   // 能活的方向里最好的
+  let fastest = null, fastestRank = Infinity;   // 不管死活，最接近苹果的
+  for (const k of cands) {
+    const nx = E.x[0] + DIRV[k][0] * UNIT_SIZE;
+    const ny = E.y[0] + DIRV[k][1] * UNIT_SIZE;
+    const rank = Math.abs(target.x - nx) + Math.abs(target.y - ny);
+    if (rank < fastestRank) { fastestRank = rank; fastest = k; }
+    if (!cellIsDeadly(nx, ny, E) && rank < safestRank) { safestRank = rank; safest = k; }
+  }
+
+  if (safest !== null) E.dir = safest;
+  else if (fastest !== null) E.dir = fastest;
 }
 
 // ============ 七、把当前状态画到屏幕上 ============
@@ -339,17 +567,20 @@ function draw() {
 
   drawBoard();
 
-  if (!running) {
+  if (!P.alive) {
     // 死了：先蒙一层半透明的黑纱，蛇和字再画在纱上面。
     // 透明度跟着 t 从 0 长到满，黑纱是"淡入"而不是"啪一下盖上来"。
     g.fillStyle = "rgba(0, 0, 0, " + (0.59 * t).toFixed(3) + ")";
     g.fillRect(0, 0, PANEL_SIZE, PANEL_SIZE);
   }
 
-  drawApple();
-  drawSnake(t, running);
+  drawApples();
 
-  if (running) drawScore();
+  // 先画电脑、再画玩家：万一两节身体重叠，你的绿蛇压在灰蛇上面，一眼能分清
+  if (E.alive) drawSnake(E, t);
+  drawSnake(P, t);
+
+  if (P.alive) drawScore();
   else gameOver(t);
 }
 
@@ -360,13 +591,13 @@ const MIN_POS = -OVERSHOOT;
 const MAX_POS = PANEL_SIZE - UNIT_SIZE + OVERSHOOT;
 
 /** 第 i 节本帧该画在哪：从"上一步的格子"滑到"这一步的格子"，滑到 t 这一成 */
-function segX(i, t) {
-  const v = prevX[i] + (snakeX[i] - prevX[i]) * t;
+function segX(s, i, t) {
+  const v = s.px[i] + (s.x[i] - s.px[i]) * t;
   return Math.max(MIN_POS, Math.min(MAX_POS, v));
 }
 
-function segY(i, t) {
-  const v = prevY[i] + (snakeY[i] - prevY[i]) * t;
+function segY(s, i, t) {
+  const v = s.py[i] + (s.y[i] - s.py[i]) * t;
   return Math.max(MIN_POS, Math.min(MAX_POS, v));
 }
 
@@ -380,12 +611,14 @@ function drawBoard() {
   }
 }
 
-/** 苹果：圆果子 + 亮晶晶的高光 + 头顶一片小叶子 */
-function drawApple() {
-  const x = appleX;
-  const y = appleY;
+/** 苹果：现在盘子上可能同时躺着好几颗（电脑蛇死后会下苹果雨），所以逐个画 */
+function drawApples() {
+  for (const a of apples) drawOneApple(a.x, a.y);
+}
 
-  // 注意 fillOval 是我们自己写的函数（见上面"七"），不是 Canvas 上下文的方法，
+/** 一颗苹果：圆果子 + 亮晶晶的高光 + 头顶一片小叶子 */
+function drawOneApple(x, y) {
+  // 注意 fillOval 是我们自己写的函数，不是 Canvas 上下文的方法，
   // 所以必须裸调用 fillOval(...)，写成 g.fillOval(...) 会直接抛异常。
   g.fillStyle = rgb(C.apple);
   fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
@@ -397,24 +630,24 @@ function drawApple() {
   fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
 }
 
-/** 蛇：一节一节圆滚滚的"扭扭糖"。t = 这一步走了几成 */
-function drawSnake(t, alive) {
-  // ---- 身体：从尾巴往蛇头画，深绿浅绿隔节相间 ----
-  for (let i = bodyParts - 1; i >= 1; i--) {
-    g.fillStyle = rgb((i % 2 === 0) ? C.bodyMid : C.bodyDark);
+/** 蛇：一节一节圆滚滚的"扭扭糖"。s = 画哪条蛇，t = 这一步走了几成 */
+function drawSnake(s, t) {
+  // ---- 身体：从尾巴往蛇头画，深浅两色隔节相间（颜色从这条蛇自己的调色板里拿）----
+  for (let i = s.parts - 1; i >= 1; i--) {
+    g.fillStyle = rgb((i % 2 === 0) ? s.pal.bodyMid : s.pal.bodyDark);
     // 每节向内缩 1 像素，节与节之间留一道缝；尾巴那节多缩几像素，收出小尖
-    const pad = (i === bodyParts - 1) ? 5 : 1;
-    fillRoundRect(segX(i, t) + pad, segY(i, t) + pad,
+    const pad = (i === s.parts - 1) ? 5 : 1;
+    fillRoundRect(segX(s, i, t) + pad, segY(s, i, t) + pad,
                   UNIT_SIZE - pad * 2, UNIT_SIZE - pad * 2, 12);
   }
 
   // ---- 蛇头：比身体大一圈 ----
-  const hx = segX(0, t);
-  const hy = segY(0, t);
-  g.fillStyle = rgb(C.head);
+  const hx = segX(s, 0, t);
+  const hy = segY(s, 0, t);
+  g.fillStyle = rgb(s.pal.head);
   fillRoundRect(hx - 1, hy - 1, UNIT_SIZE + 2, UNIT_SIZE + 2, 14);
 
-  drawFace(hx, hy, alive);
+  drawFace(s, hx, hy);
 }
 
 /**
@@ -422,10 +655,11 @@ function drawSnake(t, alive) {
  *   forward(fx, fy) = 脸正前方；side(sx, sy) = 左右分眼，永远和 forward 垂直
  * 换方向只是把向量里的 1 换成 -1，一套公式通吃。
  */
-function drawFace(hx, hy, alive) {
+function drawFace(s, hx, hy) {
+  const alive = s.alive;                 // 这条蛇现在是醒着还是晕了
   let fx = 0, fy = 0;
   let sx = 0, sy = 0;
-  switch (direction) {
+  switch (s.dir) {
     case "U": fy = -1; sx = 1; break; // 朝上：两只眼左右排
     case "D": fy =  1; sx = 1; break;
     case "L": fx = -1; sy = 1; break; // 朝左：两只眼上下排
@@ -461,7 +695,7 @@ function drawFace(hx, hy, alive) {
   // 小舌头：从嘴边伸出去，末端分个叉。
   // 有了连续时钟之后，还能让它按秒呼吸式地伸伸缩缩，蛇立马就"活"了。
   const flick = 0.5 + 0.5 * Math.sin(nowMs / 230); // 在 0 和 1 之间缓慢摆动
-  g.strokeStyle = rgb(C.tongue);
+  g.strokeStyle = rgb(s.pal.tongue);     // 舌头颜色也归各自的调色板管
   g.lineWidth = 2;
   const mx = cx + fx * 9,  my = cy + fy * 9;              // 舌头根
   const tip = 10 + 9 * flick;                              // 伸出去多远
@@ -473,17 +707,29 @@ function drawFace(hx, hy, alive) {
   g.stroke();
 }
 
-/** 左下角得分、右下角最高分。
+/** 三个角的状态：左下你的得分、右下最高分、左上电脑战况。
     注意：Canvas 的 fillText 和 Java 的 drawString 一样，y 给的是"文字的基线"而不是顶边，
     所以这些坐标可以从 Java 版直接抄过来，不用重算。 */
 function drawScore() {
   g.fillStyle = "#fff";
   g.font = "bold 16px 'Microsoft YaHei', sans-serif";
   g.textAlign = "left";
-  g.fillText("得分 " + applesEaten, UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
+  g.fillText("得分 " + P.score, UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
 
   g.textAlign = "right"; // 网页里"靠右对齐"是个现成开关，不用像 Java 那样自己量字宽
   g.fillText("最高分 " + highScore, PANEL_SIZE - UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
+
+  // 左上角盯电脑。它晕过去的时候必须把倒计时写在明面上，
+  // 否则对手凭空消失，你会以为页面又坏了。
+  g.textAlign = "left";
+  if (E.alive) {
+    g.fillStyle = rgb(E.pal.head);
+    g.fillText("电脑 " + E.score, UNIT_SIZE, UNIT_SIZE * 2 - UNIT_SIZE / 2);
+  } else {
+    const left = Math.max(0, Math.ceil((E.respawnAt - gameMs) / 1000));
+    g.fillStyle = "rgb(150, 158, 166)";
+    g.fillText("电脑 " + left + " 秒后复活", UNIT_SIZE, UNIT_SIZE * 2 - UNIT_SIZE / 2);
+  }
 }
 
 function gameOver(t) {
@@ -497,7 +743,7 @@ function gameOver(t) {
 
   g.fillStyle = "#fff";
   g.font = "18px 'Microsoft YaHei', sans-serif";
-  g.fillText("本局得分 " + applesEaten, mid, mid + 5);
+  g.fillText("本局得分 " + P.score, mid, mid + 5);
 
   g.fillStyle = "rgb(180, 255, 170)";
   g.fillText(isTouch ? "点一下屏幕再来一次" : "按空格键再来一次", mid, mid + 35);
@@ -508,9 +754,8 @@ function gameOver(t) {
 
 // 只允许"垂直方向"的按键立刻生效 —— 禁止 180 度掉头，否则蛇头会撞进自己脖子。
 function turn(to) {
-  const opposite = { U: "D", D: "U", L: "R", R: "L" };
-  if (direction !== to && direction !== opposite[to]) {
-    direction = to;
+  if (P.dir !== to && P.dir !== BACK[to]) {
+    P.dir = to;
   }
 }
 
@@ -527,7 +772,7 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
   }
 
-  if (!running) {
+  if (!P.alive) {                  // 自己晕了：这局已经结束，只认空格重开
     if (e.code === "Space") restart();
     return;
   }
@@ -552,7 +797,7 @@ canvas.addEventListener("touchend", (e) => {
   const dx = e.changedTouches[0].clientX - touchStartX;
   const dy = e.changedTouches[0].clientY - touchStartY;
 
-  if (!running) {           // 晕了的时候，点一下就重开
+  if (!P.alive) {           // 晕了的时候，点一下就重开
     restart();
     return;
   }
