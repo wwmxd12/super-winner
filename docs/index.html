@@ -30,6 +30,8 @@
   }
   .hint { margin-top: 14px; font-size: 13px; text-align: center; line-height: 1.7; }
   .hint b { color: #cfe8c8; font-weight: 600; }
+  /* 调试读数：等宽字 + 淡一点，不跟游戏抢眼神 */
+  #fps { margin-top: 6px; font-family: Consolas, monospace; font-size: 12px; color: #5f7a5a; }
 </style>
 </head>
 <body>
@@ -39,6 +41,7 @@
 <p class="hint">
   <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机直接<b>滑动</b>
 </p>
+<p id="fps">读数初始化中…</p>
 
 <script>
 "use strict";
@@ -197,6 +200,24 @@ function restart() {
   startLoop();
 }
 
+// ---- 实时读数：把"到底是不是逐帧在动"变成看得见的数字 ----
+// 最有用的不是帧率本身，而是第二行："每一格切成几帧画"。
+// 这个数 = 1 就是旧的顿挫感；接近 8 才说明插值真的在起作用。
+const fpsEl = document.getElementById("fps");
+let fpsFrames = 0;
+let fpsSince = performance.now();   // 不这么初始化的话，第一行读数会算出一个假数字
+
+function updateFps(now) {
+  fpsFrames++;
+  if (now - fpsSince < 500) return;      // 每半秒才更新一次，不拖慢游戏
+  const fps = fpsFrames * 1000 / (now - fpsSince);
+  fpsFrames = 0;
+  fpsSince = now;
+  fpsEl.textContent =
+    "屏幕刷新 " + fps.toFixed(0) + " 帧/秒 · 每一格切成 "
+    + (fps * DELAY / 1000).toFixed(1) + " 帧画（= 1 就是在跳格子）";
+}
+
 /**
  * 每一屏刷新跑一次（约 60 次/秒）。
  * 关键区别：它不是"每 130 毫秒才动一下"，而是
@@ -204,6 +225,7 @@ function restart() {
  */
 function loop(now) {
   nowMs = now;
+  updateFps(now);
 
   // 这一帧距离上一帧过了多久。切后台再回来会一次性报一个巨大的数，
   // 不夹住的话蛇会瞬移十几格，所以封顶 100 毫秒。
