@@ -113,7 +113,16 @@ try {
   highScore = 0; // 极少数隐私模式下读写会报错，忽略即可，不影响玩
 }
 
-let timer = null; // 相当于 Java 里那个 Timer，null 表示闹钟没拧开
+// 【丝滑的关键】上一帧的"格子坐标"快照。
+// 逻辑照旧一格一格跳，但渲染时拿它和当前坐标做"插值"，蛇就滑起来了。
+const prevX = new Array(GAME_UNITS * GAME_UNITS).fill(0);
+const prevY = new Array(GAME_UNITS * GAME_UNITS).fill(0);
+
+// ---- 循环状态 ----
+let rafId = null;      // requestAnimationFrame 的编号，null = 循环没在跑
+let lastFrame = 0;     // 上一帧的时间戳
+let acc = 0;           // 当前这一步已经攒了多少毫秒（0 ~ DELAY）
+let nowMs = 0;         // 本帧的绝对时间，给舌头那种"按秒呼吸"的小动画用
 
 // ============ 五、开局与投放苹果 ============
 
@@ -129,6 +138,7 @@ function newGame() {
     snakeX[i] = (5 - i) * UNIT_SIZE;
     snakeY[i] = 5 * UNIT_SIZE;
   }
+  syncPrev();  // 开局时"上一步"和"这一步"重合，蛇不会自己飘
   newApple();
 }
 
@@ -149,23 +159,76 @@ function newApple() {
   }
 }
 
-// ============ 六、闹钟响了就走这一步（游戏循环）============
+// ============ 六、游戏循环：逻辑走格子，画面按秒滑 ============
 
-/** 对应 Java 的 actionPerformed：走一步，然后重画一帧 */
-function tick() {
-  if (running) move();
+/** 把"当前格坐标"复制一份当作"上一步的格坐标"，插值才有起点。
+    注意多抄一格（i <= bodyParts）：move() 会往那个空位里写东西。 */
+function syncPrev() {
+  for (let i = 0; i <= bodyParts; i++) {
+    prevX[i] = snakeX[i];
+    prevY[i] = snakeY[i];
+  }
+}
+
+/** 走一格：先记下起点，再动 */
+function step() {
+  syncPrev();
+  move();
+}
+
+/** 启动画面循环 */
+function startLoop() {
+  if (rafId !== null) return; // 已经在跑了，别重复启动
+  lastFrame = performance.now();
+  rafId = requestAnimationFrame(loop);
+}
+
+function stopLoop() {
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+}
+
+/** 重开一局 */
+function restart() {
+  newGame();
+  acc = 0;
+  startLoop();
+}
+
+/**
+ * 每一屏刷新跑一次（约 60 次/秒）。
+ * 关键区别：它不是"每 130 毫秒才动一下"，而是
+ * "每 130 毫秒才走一格，但每一帧都把蛇画在这一格的途中"。
+ */
+function loop(now) {
+  nowMs = now;
+
+  // 这一帧距离上一帧过了多久。切后台再回来会一次性报一个巨大的数，
+  // 不夹住的话蛇会瞬移十几格，所以封顶 100 毫秒。
+  const dt = Math.min(now - lastFrame, 100);
+  lastFrame = now;
+
+  if (running) {
+    acc += dt;
+    // 攒够一个 DELAY 就走一格；一次循环里可能要走好几格（掉帧时自动补上）
+    while (acc >= DELAY && running) {
+      acc -= DELAY;
+      step();
+    }
+  } else {
+    // 已经晕了：不再走格子，但让最后那一步滑到底再定格
+    acc = Math.min(acc + dt, DELAY);
+  }
+
   draw();
-}
 
-function startTimer() {
-  stopTimer();
-  timer = setInterval(tick, DELAY); // 相当于 new Timer(DELAY, this) + timer.start()
-}
-
-function stopTimer() {
-  if (timer !== null) {
-    clearInterval(timer);
-    timer = null;
+  // 游戏结束后，等最后一步滑完就彻底停掉循环，不空转费电
+  if (running || acc < DELAY) {
+    rafId = requestAnimationFrame(loop);
+  } else {
+    rafId = null;
   }
 }
 
@@ -188,6 +251,11 @@ function move() {
   // 【第 3 步】吃到苹果了吗？吃到就把尾巴"还回来"，蛇变长一节
   if (snakeX[0] === appleX && snakeY[0] === appleY) {
     bodyParts++;
+    // 新长出来的那一节，"上一步位"就当作和"这一步位"相同：
+    // 不填这句，它会从数组里残留的旧坐标"飞"过来，看着像抽风。
+    // （物理上也是对的：蛇长大时，尾巴那一节是站在原地不动的。）
+    prevX[bodyParts - 1] = snakeX[bodyParts - 1];
+    prevY[bodyParts - 1] = snakeY[bodyParts - 1];
     applesEaten++;
     newApple();
   }
@@ -210,14 +278,12 @@ function checkCollisions() {
     }
   }
 
-  if (!running) {
-    stopTimer(); // 死了就关掉闹钟
-    if (applesEaten > highScore) {
-      highScore = applesEaten;
-      try { localStorage.setItem(HS_KEY, String(highScore)); } catch (e) { /* 存不进去就算了 */ }
-    }
-    // 这里不用自己重画：回到 tick() 后紧跟着就有一次 draw()，画面自然会定格在"晕过去"
+  if (!running && applesEaten > highScore) {
+    highScore = applesEaten;
+    try { localStorage.setItem(HS_KEY, String(highScore)); } catch (e) { /* 存不进去就算了 */ }
   }
+  // 注意：这里**不能**停掉循环。还得靠它把"最后一步滑到墙边"和淡入的黑纱画完，
+  // loop() 自己会在滑完之后停下来。
 }
 
 // ============ 七、把当前状态画到屏幕上 ============
@@ -245,19 +311,41 @@ function fillRoundRect(x, y, w, h, r) {
 
 /** 一帧画面的总调度：从最底层往上涂 */
 function draw() {
+  // 本帧的"这一步走了几成"：0 = 刚起步，1 = 已经到位。
+  // 下面所有图形都拿它做一次插值，于是 60 帧里每一帧蛇都在不同的像素上。
+  const t = Math.min(acc / DELAY, 1);
+
   drawBoard();
 
   if (!running) {
-    // 死了：先蒙一层半透明的黑纱，蛇和字再画在纱上面，就不会变暗
-    g.fillStyle = "rgba(0, 0, 0, 0.59)";
+    // 死了：先蒙一层半透明的黑纱，蛇和字再画在纱上面。
+    // 透明度跟着 t 从 0 长到满，黑纱是"淡入"而不是"啪一下盖上来"。
+    g.fillStyle = "rgba(0, 0, 0, " + (0.59 * t).toFixed(3) + ")";
     g.fillRect(0, 0, PANEL_SIZE, PANEL_SIZE);
   }
 
   drawApple();
-  drawSnake(running);
+  drawSnake(t, running);
 
   if (running) drawScore();
-  else gameOver();
+  else gameOver(t);
+}
+
+// 撞墙时蛇头的格子坐标会落到棋盘外（比如 x = 500），照直画会整节滑出画面“消失”。
+// 允许它往墙里探 6 像素再停住，看着像“撞上去”而不是“穿墙消失”。
+const OVERSHOOT = 6;
+const MIN_POS = -OVERSHOOT;
+const MAX_POS = PANEL_SIZE - UNIT_SIZE + OVERSHOOT;
+
+/** 第 i 节本帧该画在哪：从"上一步的格子"滑到"这一步的格子"，滑到 t 这一成 */
+function segX(i, t) {
+  const v = prevX[i] + (snakeX[i] - prevX[i]) * t;
+  return Math.max(MIN_POS, Math.min(MAX_POS, v));
+}
+
+function segY(i, t) {
+  const v = prevY[i] + (snakeY[i] - prevY[i]) * t;
+  return Math.max(MIN_POS, Math.min(MAX_POS, v));
 }
 
 /** 背景：若隐若现的棋盘格 */
@@ -285,20 +373,20 @@ function drawApple() {
   g.fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
 }
 
-/** 蛇：一节一节圆滚滚的"扭扭糖" */
-function drawSnake(alive) {
+/** 蛇：一节一节圆滚滚的"扭扭糖"。t = 这一步走了几成 */
+function drawSnake(t, alive) {
   // ---- 身体：从尾巴往蛇头画，深绿浅绿隔节相间 ----
   for (let i = bodyParts - 1; i >= 1; i--) {
     g.fillStyle = rgb((i % 2 === 0) ? C.bodyMid : C.bodyDark);
     // 每节向内缩 1 像素，节与节之间留一道缝；尾巴那节多缩几像素，收出小尖
     const pad = (i === bodyParts - 1) ? 5 : 1;
-    fillRoundRect(snakeX[i] + pad, snakeY[i] + pad,
+    fillRoundRect(segX(i, t) + pad, segY(i, t) + pad,
                   UNIT_SIZE - pad * 2, UNIT_SIZE - pad * 2, 12);
   }
 
   // ---- 蛇头：比身体大一圈 ----
-  const hx = snakeX[0];
-  const hy = snakeY[0];
+  const hx = segX(0, t);
+  const hy = segY(0, t);
   g.fillStyle = rgb(C.head);
   fillRoundRect(hx - 1, hy - 1, UNIT_SIZE + 2, UNIT_SIZE + 2, 14);
 
@@ -346,11 +434,14 @@ function drawFace(hx, hy, alive) {
 
   if (!alive) return; // 晕过去的时候舌头就收起来，不吐了
 
-  // 小舌头：从嘴边伸出去，末端分个叉
+  // 小舌头：从嘴边伸出去，末端分个叉。
+  // 有了连续时钟之后，还能让它按秒呼吸式地伸伸缩缩，蛇立马就"活"了。
+  const flick = 0.5 + 0.5 * Math.sin(nowMs / 230); // 在 0 和 1 之间缓慢摆动
   g.strokeStyle = rgb(C.tongue);
   g.lineWidth = 2;
-  const mx = cx + fx * 10, my = cy + fy * 10; // 舌头根
-  const tx = cx + fx * 16, ty = cy + fy * 16; // 舌头尖
+  const mx = cx + fx * 9,  my = cy + fy * 9;              // 舌头根
+  const tip = 10 + 9 * flick;                              // 伸出去多远
+  const tx = cx + fx * tip, ty = cy + fy * tip;            // 舌头尖
   g.beginPath();
   g.moveTo(mx, my); g.lineTo(tx, ty);
   g.moveTo(tx, ty); g.lineTo(tx + fx * 3 + sx * 2, ty + fy * 3 + sy * 2);
@@ -371,7 +462,8 @@ function drawScore() {
   g.fillText("最高分 " + highScore, PANEL_SIZE - UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
 }
 
-function gameOver() {
+function gameOver(t) {
+  g.globalAlpha = t;   // 字也跟着淡入，和黑纱同步
   g.textAlign = "center"; // 居中也是现成开关：x 直接给面板中线就行
   const mid = PANEL_SIZE / 2;
 
@@ -385,6 +477,7 @@ function gameOver() {
 
   g.fillStyle = "rgb(180, 255, 170)";
   g.fillText(isTouch ? "点一下屏幕再来一次" : "按空格键再来一次", mid, mid + 35);
+  g.globalAlpha = 1;   // 改完记得关回去，否则下一帧所有东西都跟着半透
 }
 
 // ============ 八、键盘：把"按了哪个键"翻译成"蛇该往哪走" ============
@@ -411,10 +504,7 @@ document.addEventListener("keydown", (e) => {
   }
 
   if (!running) {
-    if (e.code === "Space") {
-      newGame();
-      startTimer();
-    }
+    if (e.code === "Space") restart();
     return;
   }
 
@@ -439,8 +529,7 @@ canvas.addEventListener("touchend", (e) => {
   const dy = e.changedTouches[0].clientY - touchStartY;
 
   if (!running) {           // 晕了的时候，点一下就重开
-    newGame();
-    startTimer();
+    restart();
     return;
   }
 
@@ -457,20 +546,21 @@ canvas.addEventListener("touchend", (e) => {
 
 // ============ 十、切到别的标签页就自动暂停 ============
 
-// 浏览器会把后台标签页的定时器拖慢到每秒一次。不处理的话，你切出去回个消息，
-// 回来发现蛇已经自己撞墙了 —— 这里在看不见时停钟，回来再续上。
+// 浏览器会把后台标签页的动画循环拖慢甚至停掉。不处理的话，你切出去回个消息，
+// 回来发现蛇已经自己撞墙了 —— 这里在看不见时停循环，回来再续上。
+// （loop() 里那句 dt 封顶 100 毫秒是第二道保险。）
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    stopTimer();
-  } else if (running) {
-    startTimer();
+    stopLoop();
+  } else {
+    startLoop(); // startLoop 自己会判断：已经在跑就不重复启动
   }
 });
 
 // ============ 点火 ============
 newGame();
-draw();        // 先画一帧，免得白屏等第一个 130 毫秒
-startTimer();
+draw();        // 先画一帧，免得白屏等第一次刷新
+startLoop();
 </script>
 
 </body>
