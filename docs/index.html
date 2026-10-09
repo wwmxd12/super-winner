@@ -385,14 +385,16 @@ function drawApple() {
   const x = appleX;
   const y = appleY;
 
+  // 注意 fillOval 是我们自己写的函数（见上面"七"），不是 Canvas 上下文的方法，
+  // 所以必须裸调用 fillOval(...)，写成 g.fillOval(...) 会直接抛异常。
   g.fillStyle = rgb(C.apple);
-  g.fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
+  fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
 
   g.fillStyle = rgb(C.appleShine);
-  g.fillOval(x + 4, y + 6, 4, 3);
+  fillOval(x + 4, y + 6, 4, 3);
 
   g.fillStyle = rgb(C.leaf);
-  g.fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
+  fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
 }
 
 /** 蛇：一节一节圆滚滚的"扭扭糖"。t = 这一步走了几成 */
