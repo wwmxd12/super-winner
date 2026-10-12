@@ -33,45 +33,32 @@
   /* 调试读数：等宽字 + 淡一点，不跟游戏抢眼神 */
   #fps { margin-top: 6px; font-family: Consolas, monospace; font-size: 12px; color: #5f7a5a; }
 
-  /* 屏幕方向键：给手机一个"手柄"，不想滑屏的时候也能精确转向 */
-  .dpad {
+  /* 虚拟摇杆：给手机一个"手柄"，手指推着把手往哪走，蛇就朝那个方向拐 */
+  .stick {
     display: none;               /* 默认不显示，只在触屏 / 窄屏出现（见下面媒体查询） */
-    grid-template-columns: repeat(3, 60px);
-    grid-template-rows: repeat(3, 60px);
-    gap: 8px;
-    margin-top: 18px;
-    touch-action: none;          /* 按它的时候别让浏览器当成滑页面 */
+    width: 140px;
+    height: 140px;
+    margin-top: 20px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(126, 235, 96, .10), rgba(126, 235, 96, .03));
+    border: 1px solid rgba(126, 235, 96, .18);
+    align-items: center;
+    justify-content: center;
+    touch-action: none;          /* 拖动时别让浏览器当成滑页面 */
     user-select: none;
     -webkit-user-select: none;
   }
-  .dpad-btn {
-    border: none;
-    border-radius: 14px;
-    background: rgba(126, 235, 96, .12);
-    color: #cfe8c8;
-    font-size: 22px;
-    line-height: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent; /* 去掉手机上按下那层灰光 */
-    transition: background .08s, transform .08s;
-  }
-  .dpad-btn.pressed { background: rgba(126, 235, 96, .34); transform: scale(.92); }
-  .dpad-btn.up    { grid-area: 1 / 2; }
-  .dpad-btn.left  { grid-area: 2 / 1; }
-  .dpad-btn.right { grid-area: 2 / 3; }
-  .dpad-btn.down  { grid-area: 3 / 2; }
-  .dpad-mid {
-    grid-area: 2 / 2;
+  .stick-knob {
+    width: 60px;
+    height: 60px;
     border-radius: 50%;
-    background: rgba(255, 255, 255, .06);
-    pointer-events: none;        /* 中间这块只做装饰，点它没反应 */
+    background: rgba(126, 235, 96, .32);
+    box-shadow: inset 0 0 10px rgba(0, 0, 0, .3);
+    pointer-events: none;        /* 触摸事件全交给底盘，把手只负责跟着走 */
   }
-  /* 手机平板（粗指针）或窗口很窄时才亮出方向键；桌面用键盘就眼不见心不烦 */
+  /* 手机平板（粗指针）或窗口很窄时才亮出摇杆；桌面用键盘就眼不见心不烦 */
   @media (pointer: coarse), (max-width: 600px) {
-    .dpad { display: grid; }
+    .stick { display: flex; }
   }
 </style>
 </head>
@@ -80,19 +67,15 @@
 <canvas id="game"></canvas>
 
 <p class="hint">
-  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机<b>滑动</b>或用下方<b>方向键</b><br>
+  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机<b>滑动</b>或用下方<b>摇杆</b><br>
   灰黑那条是<b>电脑蛇</b>：比你<b>慢两成</b>、还会<b>偶尔走神</b>，跟你抢苹果、撞墙撞身子都会晕；<br>
   它晕了会把吃过的苹果撒回自己身上，<b>5 秒</b>后重新上场
 </p>
 <p id="fps">读数初始化中…</p>
 
-<!-- 屏幕方向键：手机画布下方的十字键，滑屏之外的第二种操作方式 -->
-<div class="dpad" id="dpad">
-  <button class="dpad-btn up"    type="button" data-dir="U">▲</button>
-  <button class="dpad-btn left"  type="button" data-dir="L">◀</button>
-  <div class="dpad-mid"></div>
-  <button class="dpad-btn right" type="button" data-dir="R">▶</button>
-  <button class="dpad-btn down"  type="button" data-dir="D">▼</button>
+<!-- 虚拟摇杆：手机画布下方的圆形摇杆，滑屏之外的第二种操作方式 -->
+<div class="stick" id="stick">
+  <div class="stick-knob" id="stickKnob"></div>
 </div>
 
 <script>
@@ -886,26 +869,65 @@ canvas.addEventListener("touchend", (e) => {
   }
 }, { passive: false });
 
-// ============ 九·五、屏幕方向键：手机上的"手柄" ============
+// ============ 九·五、虚拟摇杆：手机上的"手柄" ============
 
-// 中间那颗装饰没有 data-dir，所以不会被下面的循环抓到。
-// 用 pointerdown 而不是 click：手指一碰到就立刻转向，比等抬手更跟手。
-document.querySelectorAll(".dpad-btn[data-dir]").forEach((btn) => {
-  const dir = btn.dataset.dir;
+// 一个圆形底盘 + 一个可拖动的把手。手指按住拖动时，看把手偏离圆心最多的
+// 那根轴来决定上/下/左/右，复用 turn() 走键盘同一道门（照样禁止 180 度掉头）。
+(function () {
+  const base = document.getElementById("stick");
+  const knob = document.getElementById("stickKnob");
+  const MAX  = 42;   // 把手能被推出去的最大像素（到底盘边缘附近）
+  const DEAD = 16;   // 死区：推这么一点以内不算方向，防手抖误触
+  let active = false;
+  let lastDir = null;
+  let cx = 0, cy = 0;                 // 底盘中心在屏幕上的坐标
 
-  const press = (e) => {
-    e.preventDefault();                    // 阻止当成滑页 / 选字
-    btn.classList.add("pressed");          // 点亮按键，给个按下去的反馈
-    if (!P.alive) { restart(); return; }   // 晕了时按方向键 = 重开，跟点屏幕 / 空格一致
-    turn(dir);                             // 复用转向函数，跟键盘 / 滑屏走同一道门
-  };
-  const release = () => btn.classList.remove("pressed");
+  function setKnob(dx, dy) {
+    knob.style.transform = "translate(" + dx + "px, " + dy + "px)";
+  }
 
-  btn.addEventListener("pointerdown", press);
-  btn.addEventListener("pointerup", release);
-  btn.addEventListener("pointercancel", release);
-  btn.addEventListener("pointerleave", release);
-});
+  // 根据把手偏移决定方向并转向；只在"换了方向"时才下指令，不必每帧都喊
+  function steer(px, py) {
+    const dx = px - cx;
+    const dy = py - cy;
+    const dist = Math.hypot(dx, dy);
+    const clamp = dist > MAX ? MAX / dist : 1;   // 超出行程就贴在边缘
+    setKnob(dx * clamp, dy * clamp);
+    if (dist < DEAD) return;
+    const dir = Math.abs(dx) > Math.abs(dy)
+      ? (dx > 0 ? "R" : "L")
+      : (dy > 0 ? "D" : "U");
+    if (dir !== lastDir) { lastDir = dir; turn(dir); }
+  }
+
+  base.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const r = base.getBoundingClientRect();
+    cx = r.left + r.width / 2;
+    cy = r.top + r.height / 2;
+    active = true;
+    knob.style.transition = "none";        // 拖动时把手实时跟手，不要回弹动画
+    base.setPointerCapture(e.pointerId);   // 手指滑出底盘也继续跟踪
+    if (!P.alive) { restart(); return; }   // 晕了时碰摇杆 = 重开，跟点屏幕 / 空格一致
+    steer(e.clientX, e.clientY);
+  });
+
+  base.addEventListener("pointermove", (e) => {
+    if (!active) return;
+    e.preventDefault();
+    steer(e.clientX, e.clientY);
+  });
+
+  function release() {
+    if (!active) return;
+    active = false;
+    lastDir = null;
+    knob.style.transition = "transform .15s"; // 松手顺滑弹回中心
+    setKnob(0, 0);
+  }
+  base.addEventListener("pointerup", release);
+  base.addEventListener("pointercancel", release);
+})();
 
 // ============ 十、切到别的标签页就自动暂停 ============
 
