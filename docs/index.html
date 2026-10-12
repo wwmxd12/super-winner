@@ -158,6 +158,9 @@ function makeSnake(pal, name) {
     dir: "R",                  // 蛇头朝向：U 上 / D 下 / L 左 / R 右
     alive: true,               // 活着吗
     respawnAt: 0,              // 死了的话，游戏时间到多少毫秒复活
+    want: null,                // 攒着、还没落地的转向意图（U/D/L/R）
+    wantArc: null,             // 掉头时先往哪一侧迈第一步（摇杆横偏决定；键盘为 null）
+    queue: [],                 // 掉头“两步走”的剩余计划：非空表示回转还没做完
     pal: pal,
     name: name,
   };
@@ -169,7 +172,9 @@ const E = makeSnake(PAL_E, "电脑");   // 对手：长度、起步节数跟 P �
 // 四个朝向对应的"每走一步偏移几格"：[dx, dy]。
 // 有了这张表，前进、算 AI 候选格、画五官共用一套，不用写四套 if。
 const DIRV = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0] };
-const BACK = { U: "D", D: "U", L: "R", R: "L" };   // 反方向，用来禁止 180 度掉头
+const BACK = { U: "D", D: "U", L: "R", R: "L" };   // 反方向，用来识别“想掉头”的请求
+const LTURN = { U: "L", L: "D", D: "R", R: "U" };  // 相对当前朝向“左转”得到的新朝向
+const RTURN = { U: "R", R: "D", D: "L", L: "U" };  // 相对当前朝向“右转”得到的新朝向
 
 const rnd = (n) => Math.floor(Math.random() * n);    // 0 ~ n-1 的随机整数
 
@@ -219,6 +224,9 @@ function resetSnake(s, dir, headCol, row) {
   s.score = 0;
   s.alive = true;
   s.respawnAt = 0;
+  s.want = null;
+  s.wantArc = null;
+  s.queue = [];
   placeSnake(s, headCol, row);
   syncPrev(s);   // 开局时"上一步"和"这一步"重合，蛇不会自己飘
 }
@@ -293,12 +301,43 @@ function syncPrev(s) {
  * 玩家走一格：记起点 → 挪 → 判撞（撞墙 / 撞自己 / 撞电脑身子）→ 认领苹果。
  */
 function playerStep() {
+  commitDir();            // 先把攒下的转向意图落实成这一步的朝向（含掉头两步走）
   syncPrev(P);
   advance(P);
   checkHeadToHead();      // 头对头排在前面判：撞个正着就两个一起晕
   checkCollision(P);
   eatApples(P);
   if (apples.length === 0) spawnApple();
+}
+
+/**
+ * 每走一步之前，把攒下的转向意图结算成蛇头朝向。
+ * 关键：一步之内无论怎么狂按都只认最后一个，这就从根上杜绝了
+ * “连改两次方向却只前进一格 = 瞬间 180 度掉头一头撞脖子”的 bug。
+ * 普通 90 度转向直接生效；180 度回头则拆成“同向两拐”分两步走完。
+ */
+function commitDir() {
+  if (P.queue.length > 0) { P.dir = P.queue.shift(); return; }  // 回转未完，按计划推进
+
+  const to = P.want, arc = P.wantArc;
+  P.want = null; P.wantArc = null;
+  if (!to || to === P.dir) return;                        // 没新指令，或就是当前方向
+  if (to !== BACK[P.dir]) { P.dir = to; return; }         // 普通的 90 度拐弯
+
+  // 想 180 度回头：先往一侧迈一步（这步合法），把“真正反向”留到下一步。
+  const first = (arc && arc !== P.dir && arc !== to) ? arc : pickArc();
+  P.dir = first;
+  P.queue.push(to);
+}
+
+/** 键盘 / 滑屏请求掉头时，自动挑一个“迈出去不会立刻撞死”的侧向 */
+function pickArc() {
+  const l = LTURN[P.dir], r = RTURN[P.dir];
+  const lx = P.x[0] + DIRV[l][0] * UNIT_SIZE, ly = P.y[0] + DIRV[l][1] * UNIT_SIZE;
+  const rx = P.x[0] + DIRV[r][0] * UNIT_SIZE, ry = P.y[0] + DIRV[r][1] * UNIT_SIZE;
+  if (!cellIsDeadly(lx, ly, P)) return l;
+  if (!cellIsDeadly(rx, ry, P)) return r;
+  return l;   // 两边都堵死，那就随便一头（反正要撞了）
 }
 
 /**
@@ -821,11 +860,14 @@ function gameOver(t) {
 
 // ============ 八、键盘：把"按了哪个键"翻译成"蛇该往哪走" ============
 
-// 只允许"垂直方向"的按键立刻生效 —— 禁止 180 度掉头，否则蛇头会撞进自己脖子。
-function turn(to) {
-  if (P.dir !== to && P.dir !== BACK[to]) {
-    P.dir = to;
-  }
+// 转向意图先攒进 P.want，等下一步真正要走时由 commitDir() 统一落地。
+// 这样一步之内无论你怎么狂按，都只认最后一个，杜绝“连改两次方向、
+// 却只前进一格 = 瞬间 180 度掉头一头撞脖子”的老 bug。
+// 想 180 度回头也不再是禁忌：交给 commitDir 拆成同向两拐实现。
+// arc：可选，掉头时先迈的侧向（由摇杆给出）；不传则由 pickArc() 自动选安全一侧。
+function turn(to, arc) {
+  P.want = to;
+  P.wantArc = arc || null;
 }
 
 const KEY_MAP = {
@@ -885,7 +927,7 @@ canvas.addEventListener("touchend", (e) => {
 // ============ 九·五、虚拟摇杆：手机上的"手柄" ============
 
 // 一个圆形底盘 + 一个可拖动的把手。手指按住拖动时，看把手偏离圆心最多的
-// 那根轴来决定上/下/左/右，复用 turn() 走键盘同一道门（照样禁止 180 度掉头）。
+// 那根轴来决定上/下/左/右，复用 turn() 走键盘同一道门；反推就是掉头。
 (function () {
   const base = document.getElementById("stick");
   const knob = document.getElementById("stickKnob");
@@ -899,7 +941,9 @@ canvas.addEventListener("touchend", (e) => {
     knob.style.transform = "translate(" + dx + "px, " + dy + "px)";
   }
 
-  // 根据把手偏移决定方向并转向；只在"换了方向"时才下指令，不必每帧都喊
+  // 根据把手偏移决定方向并转向；只在"换了方向"时才下指令，不必每帧都喊。
+  // arc = 掉头时先迈的侧向：看把手在“垂直于主轴”的那根轴上往哪偏，
+  // 于是“想回头时把手偏左就左左回转、偏右就右右回转”。
   function steer(px, py) {
     const dx = px - cx;
     const dy = py - cy;
@@ -907,10 +951,12 @@ canvas.addEventListener("touchend", (e) => {
     const clamp = dist > MAX ? MAX / dist : 1;   // 超出行程就贴在边缘
     setKnob(dx * clamp, dy * clamp);
     if (dist < DEAD) return;
-    const dir = Math.abs(dx) > Math.abs(dy)
-      ? (dx > 0 ? "R" : "L")
-      : (dy > 0 ? "D" : "U");
-    if (dir !== lastDir) { lastDir = dir; turn(dir); }
+    const horiz = Math.abs(dx) > Math.abs(dy);
+    const dir = horiz ? (dx > 0 ? "R" : "L") : (dy > 0 ? "D" : "U");
+    // 横着走 → 用纵向偏移定侧向；竖着走 → 用横向偏移定侧向
+    const arc = horiz ? (dy > 0 ? "D" : dy < 0 ? "U" : null)
+                      : (dx > 0 ? "R" : dx < 0 ? "L" : null);
+    if (dir !== lastDir) { lastDir = dir; turn(dir, arc); }
   }
 
   base.addEventListener("pointerdown", (e) => {
