@@ -973,6 +973,8 @@ canvas.addEventListener("touchend", (e) => {
   const knob = document.getElementById("stickKnob");
   const MAX  = 36;   // 把手能被推出去的最大像素（调小→手指行程短、轻推就到底，更跟手）
   const DEAD = 8;    // 死区：推这么一点以内不算方向。调小→更灵敏（原 16，普遍觉得太钝）
+  const DIAG = 1.3;  // 斜向灰区：主轴超过另一轴这么多倍才算真想往那边转，45°附近不换向
+  const REV  = 2.2;  // 反向(掉头)更严：接近正后方才触发 180 度回转，防手滑横扫把自己送死
   let active = false;
   let lastDir = null;
   let cx = 0, cy = 0;                 // 底盘中心在屏幕上的坐标
@@ -991,8 +993,17 @@ canvas.addEventListener("touchend", (e) => {
     const clamp = dist > MAX ? MAX / dist : 1;   // 超出行程就贴在边缘
     setKnob(dx * clamp, dy * clamp);
     if (dist < DEAD) return;
-    const horiz = Math.abs(dx) > Math.abs(dy);
+    const ax = Math.abs(dx), ay = Math.abs(dy);
+    const horiz = ax > ay * DIAG;   // 横向明显占优
+    const vert  = ay > ax * DIAG;   // 纵向明显占优
+    if (!horiz && !vert) return;    // 落在斜向灰区：维持当前朝向，不下指令
     const dir = horiz ? (dx > 0 ? "R" : "L") : (dy > 0 ? "D" : "U");
+    // 反向（会触发 180 度掉头）最危险：要求这一轴压倒性占优、接近正后方才认，
+    // 免得横扫或手滑把往上误判成往下，直接撞死自己。
+    if (dir === BACK[P.dir]) {
+      const dom = horiz ? ax : ay, minor = horiz ? ay : ax;
+      if (dom < minor * REV) return;
+    }
     // 横着走 → 用纵向偏移定侧向；竖着走 → 用横向偏移定侧向
     const arc = horiz ? (dy > 0 ? "D" : dy < 0 ? "U" : null)
                       : (dx > 0 ? "R" : dx < 0 ? "L" : null);
