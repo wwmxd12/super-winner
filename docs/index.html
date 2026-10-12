@@ -69,7 +69,8 @@
 <p class="hint">
   <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机<b>滑动</b>或用下方<b>摇杆</b><br>
   灰黑那条是<b>电脑蛇</b>：比你<b>慢两成</b>、还会<b>偶尔走神</b>，跟你抢苹果、撞墙撞身子都会晕；<br>
-  它晕了会把吃过的苹果撒回自己身上，<b>5 秒</b>后重新上场
+  它晕了会把吃过的苹果撒回自己身上，<b>5 秒</b>后重新上场<br>
+  盘子里偶尔会冒出一颗<b>金苹果</b>：谁吃到谁 <b>6 秒无敌</b>，除了撞墙都不死，还能把对方一头撞晕
 </p>
 <p id="fps">读数初始化中…</p>
 
@@ -99,6 +100,11 @@ const RESPAWN_MS  = 5000;   // 电脑蛇死后隔多少毫秒复活
 const MAX_APPLES  = 12;     // 棋盘上同时最多几颗苹果（防止电脑反复死把盘子堆满）
 const SLOW_F      = 0.8;    // 电脑蛇速度 = 玩家的几成（0.8 = 比玩家慢 20%）
 const E_DELAY     = Math.round(DELAY / SLOW_F); // 电脑蛇每格毫秒数（更慢 → 数值更大）
+
+// 超级金苹果（吃了无敌）相关的“规则数字”，想调频率/时长只改这里
+const GOLDEN_FIRST  = 7000;   // 开局多久后出现第一颗金苹果（毫秒）
+const GOLDEN_MS     = 15000;  // 金苹果被吃后，隔多久再冒下一颗（毫秒）
+const INVINCIBLE_MS = 6000;   // 吃到金苹果后的无敌时长（毫秒）
 const AI_DITZY    = 0.2;    // 电脑蛇每步"走神"的概率：越大越笨，越不死咬着你
 
 // ============ 二、配色表：想换造型只改这里 ============
@@ -110,6 +116,8 @@ const C = {
   leaf:      [126, 214, 96], // 苹果叶子
   eyeWhite:  [255, 255, 255],// 眼白
   pupil:     [40, 40, 40],   // 瞳孔
+  gold:      [255, 208, 70],  // 金苹果本体
+  goldShine: [255, 245, 200], // 金苹果高光
 };
 
 // 每条蛇一套配色。画身体的代码只写一遍，颜色由传进去的这套决定，
@@ -158,6 +166,7 @@ function makeSnake(pal, name) {
     dir: "R",                  // 蛇头朝向：U 上 / D 下 / L 左 / R 右
     alive: true,               // 活着吗
     respawnAt: 0,              // 死了的话，游戏时间到多少毫秒复活
+    invUntil: 0,               // 无敌到 gameMs 多少毫秒为止（吃到金苹果才有）
     buf: [],                   // 输入缓冲队列：最多存两个待落地的转向意图 {to, arc}
     queue: [],                 // 掉头“两步走”的剩余计划：非空表示回转还没做完
     pal: pal,
@@ -180,6 +189,10 @@ const rnd = (n) => Math.floor(Math.random() * n);    // 0 ~ n-1 的随机整数
 // 苹果从"一个坐标"改成"一份清单"：电脑蛇死的时候要把吃掉的苹果撒回躯体上，
 // 盘子上就可能同时躺着好几颗，所以必须用数组才装得下。
 const apples = [];             // 每个元素是 { x, y }，苹果所在格子的左上角像素坐标
+
+// 金苹果：单独一个（不是普通苹果清单里的），场上同时最多一颗。
+let golden = null;             // 当前那颗金苹果 { x, y }；null = 暂时没有
+let goldenNextAt = 0;          // 游戏时间到多少毫秒该再冒一颗金苹果
 
 // 是不是触屏设备（手机/平板）。下面"晕过去"那行提示要拿它决定写"按空格"还是"点一下"，
 // 所以必须放在文件开头就算好 —— 谁在前面用，谁就得先声明。
@@ -223,6 +236,7 @@ function resetSnake(s, dir, headCol, row) {
   s.score = 0;
   s.alive = true;
   s.respawnAt = 0;
+  s.invUntil = 0;
   s.buf = [];
   s.queue = [];
   placeSnake(s, headCol, row);
@@ -233,6 +247,8 @@ function resetSnake(s, dir, headCol, row) {
 function newGame() {
   apples.length = 0;
   gameMs = 0;
+  golden = null;                 // 金苹果：每局重置
+  goldenNextAt = GOLDEN_FIRST;
 
   // 玩家：左上角，头朝右
   resetSnake(P, "R", 5, 5);
@@ -277,10 +293,47 @@ function spawnApple() {
   for (let tries = 0; tries < 400; tries++) {
     const x = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;   // 1~23 列，不贴墙
     const y = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;   // 1~23 行，不贴墙
-    if (!cellBusy(x, y) && appleIndexAt(x, y) < 0) {
+    if (!cellBusy(x, y) && appleIndexAt(x, y) < 0 && !goldenAt(x, y)) {
       apples.push({ x: x, y: y });
       return;
     }
+  }
+}
+
+/** 这个格子是不是正好摆着金苹果 */
+function goldenAt(x, y) { return !!golden && golden.x === x && golden.y === y; }
+
+/** 蛇是否处于无敌：吃了金苹果、且还没到期 */
+function isInv(s) { return s.alive && gameMs < s.invUntil; }
+
+/** 找一个空位（不贴墙、不在活蛇身上、不压已有苹果/金苹果）；找不到返回 null */
+function findFreeCell() {
+  for (let tries = 0; tries < 400; tries++) {
+    const x = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;
+    const y = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;
+    if (cellBusy(x, y)) continue;
+    if (appleIndexAt(x, y) >= 0) continue;
+    if (goldenAt(x, y)) continue;
+    return { x: x, y: y };
+  }
+  return null;
+}
+
+/** 该冒金苹果了就冒一颗：场上同时最多一颗，摆上后停表直到被吃 */
+function maybeSpawnGolden() {
+  if (golden !== null || gameMs < goldenNextAt) return;
+  const cell = findFreeCell();
+  if (cell) { golden = cell; goldenNextAt = Infinity; }
+  else goldenNextAt = gameMs + 1000;   // 塞不下，一秒后再试
+}
+
+/** 谁把头停到金苹果上谁就吃到：立刻无敌 INVINCIBLE_MS，并排下一颗的出场时间 */
+function eatGolden(s) {
+  if (!golden || !s.alive) return;
+  if (golden.x === s.x[0] && golden.y === s.y[0]) {
+    golden = null;
+    goldenNextAt = gameMs + GOLDEN_MS;
+    s.invUntil = gameMs + INVINCIBLE_MS;
   }
 }
 
@@ -305,7 +358,9 @@ function playerStep() {
   checkHeadToHead();      // 头对头排在前面判：撞个正着算玩家赢（只死电脑蛇）
   checkCollision(P);
   eatApples(P);
+  eatGolden(P);
   if (apples.length === 0) spawnApple();
+  maybeSpawnGolden();
 }
 
 /**
@@ -368,6 +423,7 @@ function enemyStep() {
   checkHeadToHead();
   checkCollision(E);
   eatApples(E);
+  eatGolden(E);
   if (apples.length === 0) spawnApple();
 }
 
@@ -468,38 +524,54 @@ function advance(s) {
   s.y[0] += d[1] * UNIT_SIZE;
 }
 
-/** 撞墙 / 撞自己 / 撞对方。判定只看离散的格子坐标，绝不用插值后的画面坐标 */
+/** 撞墙 / 撞自己 / 撞对方。判定只看离散的格子坐标，绝不用插值后的画面坐标。
+    无敌（吃了金苹果）时：撞墙照样死，撞自己/撞对方都不怕，还能把对方撞死。 */
 function checkCollision(s) {
   const hx = s.x[0], hy = s.y[0];
 
-  // 情况 A：蛇头撞到四条边框
+  // 情况 A：撞墙 —— 无敌也救不了，照死
   if (hx < 0 || hx >= PANEL_SIZE || hy < 0 || hy >= PANEL_SIZE) { kill(s); return; }
 
-  // 情况 B：蛇头撞到自己身上（从 1 开始，不能跟自己撞）
-  for (let i = 1; i < s.parts; i++) {
-    if (s.x[i] === hx && s.y[i] === hy) { kill(s); return; }
+  const inv = isInv(s);
+
+  // 情况 B：撞自己 —— 只有不无敌才会死
+  if (!inv) {
+    for (let i = 1; i < s.parts; i++) {
+      if (s.x[i] === hx && s.y[i] === hy) { kill(s); return; }
+    }
   }
 
-  // 情况 C：撞进对方身体。两条蛇互相当墙，否则身体会叠在一起看不清谁是谁
+  // 情况 C：撞进对方身体。两条蛇互相当墙；谁能撞死谁，看谁无敌
   const other = s === P ? E : P;
   if (other.alive) {
     for (let i = 0; i < other.parts; i++) {
-      if (other.x[i] === hx && other.y[i] === hy) { kill(s); return; }
+      if (other.x[i] === hx && other.y[i] === hy) {
+        if (inv && !isInv(other)) kill(other);   // 我无敌、对方不无敌：撞死对方，我没事
+        else if (!inv) kill(s);                  // 我不无敌：撞上就是死（对方无敌时更是）
+        // 双方都无敌：互相穿过去，都不死
+        return;
+      }
     }
   }
 }
 
-/** 头对头：两条蛇头撞进同一格，按“对撞算玩家赢” —— 只死电脑蛇，玩家蛇没事。
-    （但玩家一头扎进电脑“身子”仍会死，那属于“撞墙”，不在这条规则里。）*/
+/** 头对头撞进同一格（含无敌）：谁无敌谁活、另一个死；
+    都不无敌时维持“对撞算玩家赢”（只死电脑蛇）；都无敌则互相穿过、都不死。 */
 function checkHeadToHead() {
   if (!P.alive || !E.alive) return;
-  if (P.x[0] === E.x[0] && P.y[0] === E.y[0]) kill(E);
+  if (P.x[0] !== E.x[0] || P.y[0] !== E.y[0]) return;
+  const pInv = isInv(P), eInv = isInv(E);
+  if (pInv && !eInv) kill(E);
+  else if (eInv && !pInv) kill(P);
+  else if (!pInv && !eInv) kill(E);   // 都不无敌：对撞算玩家赢
+  // 都无敌：都不死
 }
 
 /** 让一条蛇晕过去。已经晕了的不重复处理，免得苹果撒两遍、最高分存两遍 */
 function kill(s) {
   if (!s.alive) return;
   s.alive = false;
+  s.invUntil = 0;   // 死了无敌也就没了
 
   if (s === E) {
     // 电脑蛇：把吃掉的苹果撒回躯体上，并排一个复活时间点
@@ -614,7 +686,7 @@ function cellIsDeadly(x, y, s) {
  * —— 反正要死，而且它死在哪里，哪里就会下苹果雨，那正是你要的东西。
  */
 function aiThink() {
-  if (!E.alive || apples.length === 0) return;   // 没苹果就懒得动，保持原方向
+  if (!E.alive || (apples.length === 0 && !golden)) return;   // 没吃食才懒得动
 
   // 走神：有一定概率干脆不看苹果，随便晃。这样它就不会像导航一样死咬着
   // 最近的苹果追你，看着更像一条"有点笨"的蛇，你更容易抢先。
@@ -631,12 +703,18 @@ function aiThink() {
     return;
   }
 
-  // 1. 找离蛇头最近的一颗苹果（曼哈顿距离：横竖各好几格相加）
+  // 1. 选目标：有金苹果就优先冲金苹果，否则找离蛇头最近的普通苹果（曼哈顿距离）
   let target = null, targetD = Infinity;
-  for (const a of apples) {
-    const d = Math.abs(a.x - E.x[0]) + Math.abs(a.y - E.y[0]);
-    if (d < targetD) { targetD = d; target = a; }
+  if (golden) {
+    target = golden;
+    targetD = Math.abs(golden.x - E.x[0]) + Math.abs(golden.y - E.y[0]);
+  } else {
+    for (const a of apples) {
+      const d = Math.abs(a.x - E.x[0]) + Math.abs(a.y - E.y[0]);
+      if (d < targetD) { targetD = d; target = a; }
+    }
   }
+  if (!target) return;
 
   // 2. 四个方向里，先排掉 180 度掉头
   const cands = [];
@@ -738,6 +816,7 @@ function drawBoard() {
 /** 苹果：现在盘子上可能同时躺着好几颗（电脑蛇死后会下苹果雨），所以逐个画 */
 function drawApples() {
   for (const a of apples) drawOneApple(a.x, a.y);
+  drawGoldenApple();
 }
 
 /** 一颗苹果：圆果子 + 亮晶晶的高光 + 头顶一片小叶子 */
@@ -754,8 +833,33 @@ function drawOneApple(x, y) {
   fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
 }
 
+/** 金苹果：比普通苹果更亮，还带一圈呼吸的光晕，好让你在盘子里一眼锁定它 */
+function drawGoldenApple() {
+  if (!golden) return;
+  const x = golden.x, y = golden.y;
+  const pulse = 0.5 + 0.5 * Math.sin(nowMs / 200);
+  g.save();
+  g.shadowColor = "rgba(255, 210, 80, " + (0.55 + 0.45 * pulse).toFixed(2) + ")";
+  g.shadowBlur = 10 + 8 * pulse;
+  g.fillStyle = rgb(C.gold);
+  fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
+  g.restore();
+  g.fillStyle = rgb(C.goldShine);
+  fillOval(x + 4, y + 6, 4, 3);
+  g.fillStyle = rgb(C.leaf);
+  fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
+}
+
 /** 蛇：一节一节圆滚滚的"扭扭糖"。s = 画哪条蛇，t = 这一步走了几成 */
 function drawSnake(s, t) {
+  // 无敌期间：给整条蛇罩一层会呼吸的金色光晕，一眼看出现在谁都撞不死它
+  const inv = isInv(s);
+  if (inv) {
+    g.save();
+    g.shadowColor = "rgba(255, 210, 80, 0.95)";
+    g.shadowBlur = 10 + 8 * (0.5 + 0.5 * Math.sin(nowMs / 120));
+  }
+
   // ---- 身体：从尾巴往蛇头画，深浅两色隔节相间（颜色从这条蛇自己的调色板里拿）----
   for (let i = s.parts - 1; i >= 1; i--) {
     g.fillStyle = rgb((i % 2 === 0) ? s.pal.bodyMid : s.pal.bodyDark);
@@ -770,6 +874,8 @@ function drawSnake(s, t) {
   const hy = segY(s, 0, t);
   g.fillStyle = rgb(s.pal.head);
   fillRoundRect(hx - 1, hy - 1, UNIT_SIZE + 2, UNIT_SIZE + 2, 14);
+
+  if (inv) g.restore();   // 关掉光晕，五官画清晰点
 
   drawFace(s, hx, hy);
 }
@@ -853,6 +959,14 @@ function drawScore() {
     const left = Math.max(0, Math.ceil((E.respawnAt - gameMs) / 1000));
     g.fillStyle = "rgb(150, 158, 166)";
     g.fillText("电脑 " + left + " 秒后复活", UNIT_SIZE, UNIT_SIZE * 2 - UNIT_SIZE / 2);
+  }
+
+  // 玩家正无敌时，顶部中间显示剩余秒数，免得不知道自己几时“金钟罩”到期
+  if (isInv(P)) {
+    g.textAlign = "center";
+    g.fillStyle = "rgb(255, 214, 90)";
+    g.fillText("金钟护体 " + Math.ceil((P.invUntil - gameMs) / 1000) + " 秒",
+               PANEL_SIZE / 2, UNIT_SIZE * 2 - UNIT_SIZE / 2);
   }
 }
 
