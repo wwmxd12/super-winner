@@ -32,6 +32,47 @@
   .hint b { color: #cfe8c8; font-weight: 600; }
   /* 调试读数：等宽字 + 淡一点，不跟游戏抢眼神 */
   #fps { margin-top: 6px; font-family: Consolas, monospace; font-size: 12px; color: #5f7a5a; }
+
+  /* 屏幕方向键：给手机一个"手柄"，不想滑屏的时候也能精确转向 */
+  .dpad {
+    display: none;               /* 默认不显示，只在触屏 / 窄屏出现（见下面媒体查询） */
+    grid-template-columns: repeat(3, 60px);
+    grid-template-rows: repeat(3, 60px);
+    gap: 8px;
+    margin-top: 18px;
+    touch-action: none;          /* 按它的时候别让浏览器当成滑页面 */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .dpad-btn {
+    border: none;
+    border-radius: 14px;
+    background: rgba(126, 235, 96, .12);
+    color: #cfe8c8;
+    font-size: 22px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent; /* 去掉手机上按下那层灰光 */
+    transition: background .08s, transform .08s;
+  }
+  .dpad-btn.pressed { background: rgba(126, 235, 96, .34); transform: scale(.92); }
+  .dpad-btn.up    { grid-area: 1 / 2; }
+  .dpad-btn.left  { grid-area: 2 / 1; }
+  .dpad-btn.right { grid-area: 2 / 3; }
+  .dpad-btn.down  { grid-area: 3 / 2; }
+  .dpad-mid {
+    grid-area: 2 / 2;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, .06);
+    pointer-events: none;        /* 中间这块只做装饰，点它没反应 */
+  }
+  /* 手机平板（粗指针）或窗口很窄时才亮出方向键；桌面用键盘就眼不见心不烦 */
+  @media (pointer: coarse), (max-width: 600px) {
+    .dpad { display: grid; }
+  }
 </style>
 </head>
 <body>
@@ -39,11 +80,20 @@
 <canvas id="game"></canvas>
 
 <p class="hint">
-  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机直接<b>滑动</b><br>
-  灰黑那条是<b>电脑蛇</b>，跟你抢苹果、撞墙撞身子都会晕；<br>
+  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机<b>滑动</b>或用下方<b>方向键</b><br>
+  灰黑那条是<b>电脑蛇</b>：比你<b>慢两成</b>、还会<b>偶尔走神</b>，跟你抢苹果、撞墙撞身子都会晕；<br>
   它晕了会把吃过的苹果撒回自己身上，<b>5 秒</b>后重新上场
 </p>
 <p id="fps">读数初始化中…</p>
+
+<!-- 屏幕方向键：手机画布下方的十字键，滑屏之外的第二种操作方式 -->
+<div class="dpad" id="dpad">
+  <button class="dpad-btn up"    type="button" data-dir="U">▲</button>
+  <button class="dpad-btn left"  type="button" data-dir="L">◀</button>
+  <div class="dpad-mid"></div>
+  <button class="dpad-btn right" type="button" data-dir="R">▶</button>
+  <button class="dpad-btn down"  type="button" data-dir="D">▼</button>
+</div>
 
 <script>
 "use strict";
@@ -58,12 +108,15 @@
 const UNIT_SIZE  = 20;                        // 一个格子边长 20 像素
 const GAME_UNITS = 25;                        // 横竖各 25 个格子
 const PANEL_SIZE = UNIT_SIZE * GAME_UNITS;    // 所以画布是 500 x 500
-const DELAY      = 130;                       // 每隔 130 毫秒走一步（越小越快）
+const DELAY      = 130;                       // 玩家每隔 130 毫秒走一步（越小越快）
 
-// 下面三个是加了电脑蛇之后的"规则数字"，想调难度只改这里
+// 下面几个是加了电脑蛇之后的"规则数字"，想调难度只改这里
 const START_PARTS = 6;      // 开局几节身体：玩家和电脑一模一样
 const RESPAWN_MS  = 5000;   // 电脑蛇死后隔多少毫秒复活
 const MAX_APPLES  = 12;     // 棋盘上同时最多几颗苹果（防止电脑反复死把盘子堆满）
+const SLOW_F      = 0.8;    // 电脑蛇速度 = 玩家的几成（0.8 = 比玩家慢 20%）
+const E_DELAY     = Math.round(DELAY / SLOW_F); // 电脑蛇每格毫秒数（更慢 → 数值更大）
+const AI_DITZY    = 0.4;    // 电脑蛇每步"走神"的概率：越大越笨，越不死咬着你
 
 // ============ 二、配色表：想换造型只改这里 ============
 const C = {
@@ -128,7 +181,7 @@ function makeSnake(pal, name) {
 }
 
 const P = makeSnake(PAL_P, "玩家");   // 你
-const E = makeSnake(PAL_E, "电脑");   // 对手：长度、速度、起步节数跟 P 一模一样
+const E = makeSnake(PAL_E, "电脑");   // 对手：长度、起步节数跟 P 一样，但慢 20%、还偶尔走神
 
 // 四个朝向对应的"每走一步偏移几格"：[dx, dy]。
 // 有了这张表，前进、算 AI 候选格、画五官共用一套，不用写四套 if。
@@ -158,7 +211,8 @@ try {
 // ---- 循环状态 ----
 let rafId = null;      // requestAnimationFrame 的编号，null = 循环没在跑
 let lastFrame = 0;     // 上一帧的时间戳
-let acc = 0;           // 当前这一步已经攒了多少毫秒（0 ~ DELAY）
+let acc = 0;           // 玩家这一步已经攒了多少毫秒（0 ~ DELAY）
+let eAcc = 0;          // 电脑蛇自己那一步攒的毫秒（0 ~ E_DELAY）：它慢一拍，单独计时
 let nowMs = 0;         // 本帧的绝对时间，给舌头那种"按秒呼吸"的小动画用
 let gameMs = 0;        // 本局已经玩了多久。复活倒计时用它而不是 nowMs：
                        // 切走标签页时循环会停、gameMs 也跟着停，
@@ -243,30 +297,31 @@ function syncPrev(s) {
 }
 
 /**
- * 走一格。两条蛇是"同时"动的，所以顺序很讲究：
- * 先各自记起点 → 电脑想一想往哪走 → 两条蛇同时挪 → 再统一判撞 → 最后各自认领苹果。
- * 如果让玩家先挪完、先判撞、先吃苹果，电脑就永远慢半拍，抢不过你。
+ * 玩家走一格：记起点 → 挪 → 判撞（撞墙 / 撞自己 / 撞电脑身子）→ 认领苹果。
  */
-function step() {
+function playerStep() {
   syncPrev(P);
-  if (E.alive) syncPrev(E);
-
-  aiThink();
-
   advance(P);
-  if (E.alive) advance(E);
-
-  // 两条蛇都落位之后再统一判撞，谁也不占先后便宜。
-  // 头对头必须排在最前面判：它要的是"两个一起死"。放在后面的话，
-  // 先被检查的那条会先因为"撞进对方身体"单独死掉，另一条反而白捡一条命。
-  checkHeadToHead();
+  checkHeadToHead();      // 头对头排在前面判：撞个正着就两个一起晕
   checkCollision(P);
-  if (E.alive) checkCollision(E);
-
-  eatApples();
-
+  eatApples(P);
   if (apples.length === 0) spawnApple();
+}
+
+/**
+ * 电脑蛇走一格。它比玩家慢一拍，所以不再跟玩家同步，而是由自己的计时器
+ * 单独触发（见 loop 里的 eAcc）。复活倒计时也挂在这儿，照常往前走。
+ */
+function enemyStep() {
   tryRespawn();
+  if (!E.alive) return;   // 还没到复活点，这一步没它的事
+  syncPrev(E);
+  aiThink();              // 电脑想一想往哪走（偶尔走神）
+  advance(E);
+  checkHeadToHead();
+  checkCollision(E);
+  eatApples(E);
+  if (apples.length === 0) spawnApple();
 }
 
 /** 启动画面循环 */
@@ -287,6 +342,7 @@ function stopLoop() {
 function restart() {
   newGame();
   acc = 0;
+  eAcc = 0;
   startLoop();
 }
 
@@ -324,21 +380,27 @@ function loop(now) {
 
   if (P.alive) {
     gameMs += dt;          // 本局计时：电脑蛇的复活倒计时看它
-    acc += dt;
-    // 攒够一个 DELAY 就走一格；一次循环里可能要走好几格（掉帧时自动补上）
+    acc  += dt;
+    eAcc += dt;            // 电脑蛇独立计时：攒够 E_DELAY 才走一格，于是比你慢
+    // 各自攒够自己的步长就走一格；掉帧时 while 会自动补上
     while (acc >= DELAY && P.alive) {
       acc -= DELAY;
-      step();
+      playerStep();
+    }
+    while (eAcc >= E_DELAY && P.alive) {
+      eAcc -= E_DELAY;
+      enemyStep();
     }
   } else {
     // 你已经晕了：这一局结束，不再走格子，只让最后那一步滑到底再定格
-    acc = Math.min(acc + dt, DELAY);
+    acc  = Math.min(acc + dt, DELAY);
+    eAcc = Math.min(eAcc + dt, E_DELAY);
   }
 
   draw();
 
-  // 游戏结束后，等最后一步滑完就彻底停掉循环，不空转费电
-  if (P.alive || acc < DELAY) {
+  // 游戏结束后，等两条蛇最后一步都滑完就彻底停掉循环，不空转费电
+  if (P.alive || acc < DELAY || eAcc < E_DELAY) {
     rafId = requestAnimationFrame(loop);
   } else {
     rafId = null;
@@ -380,13 +442,10 @@ function checkCollision(s) {
   }
 }
 
-/** 头对头：撞进同一格，或者一步之内互相穿过去，两个都不活 */
+/** 头对头：两条蛇头撞进同一格，两个都不活（谁也别想白捡一条命）*/
 function checkHeadToHead() {
   if (!P.alive || !E.alive) return;
-  const sameCell = P.x[0] === E.x[0] && P.y[0] === E.y[0];
-  const swapped  = P.x[0] === E.px[0] && P.y[0] === E.py[0]
-                && E.x[0] === P.px[0] && E.y[0] === P.py[0];
-  if (sameCell || swapped) { kill(P); kill(E); }
+  if (P.x[0] === E.x[0] && P.y[0] === E.y[0]) { kill(P); kill(E); }
 }
 
 /** 让一条蛇晕过去。已经晕了的不重复处理，免得苹果撒两遍、最高分存两遍 */
@@ -431,21 +490,19 @@ function dropApplesOnBody(s) {
   }
 }
 
-/** 两条蛇各自认领：蛇头停在有苹果的格子上就吃掉、变长一节 */
-function eatApples() {
-  for (const s of [P, E]) {
-    if (!s.alive) continue;
-    const ai = appleIndexAt(s.x[0], s.y[0]);
-    if (ai < 0) continue;
-    apples.splice(ai, 1);
-    s.parts++;
-    // 新长出来的那一节，"上一步位"就当作和"这一步位"相同：
-    // 不填这句，它会从数组里残留的旧坐标"飞"过来，看着像抽风。
-    // （物理上也是对的：蛇长大时，尾巴那一节是站在原地不动的。）
-    s.px[s.parts - 1] = s.x[s.parts - 1];
-    s.py[s.parts - 1] = s.y[s.parts - 1];
-    s.score++;
-  }
+/** 蛇头停在有苹果的格子上就吃掉、变长一节（现在两条蛇分开走，所以一次喂一条）*/
+function eatApples(s) {
+  if (!s.alive) return;
+  const ai = appleIndexAt(s.x[0], s.y[0]);
+  if (ai < 0) return;
+  apples.splice(ai, 1);
+  s.parts++;
+  // 新长出来的那一节，"上一步位"就当作和"这一步位"相同：
+  // 不填这句，它会从数组里残留的旧坐标"飞"过来，看着像抽风。
+  // （物理上也是对的：蛇长大时，尾巴那一节是站在原地不动的。）
+  s.px[s.parts - 1] = s.x[s.parts - 1];
+  s.py[s.parts - 1] = s.y[s.parts - 1];
+  s.score++;
 }
 
 /** 到点就把电脑蛇放回棋盘 */
@@ -508,6 +565,21 @@ function cellIsDeadly(x, y, s) {
 function aiThink() {
   if (!E.alive || apples.length === 0) return;   // 没苹果就懒得动，保持原方向
 
+  // 走神：有一定概率干脆不看苹果，随便晃。这样它就不会像导航一样死咬着
+  // 最近的苹果追你，看着更像一条"有点笨"的蛇，你更容易抢先。
+  if (Math.random() < AI_DITZY) {
+    const free = [];
+    for (const k in DIRV) {
+      if (k === BACK[E.dir]) continue;           // 照样禁止 180 度掉头
+      const nx = E.x[0] + DIRV[k][0] * UNIT_SIZE;
+      const ny = E.y[0] + DIRV[k][1] * UNIT_SIZE;
+      if (!cellIsDeadly(nx, ny, E)) free.push(k);
+    }
+    // 能安全晃的方向里随机挑一个；全都致命就保持原方向，别自己送头
+    if (free.length > 0) E.dir = free[rnd(free.length)];
+    return;
+  }
+
   // 1. 找离蛇头最近的一颗苹果（曼哈顿距离：横竖各好几格相加）
   let target = null, targetD = Infinity;
   for (const a of apples) {
@@ -562,8 +634,9 @@ function fillRoundRect(x, y, w, h, r) {
 /** 一帧画面的总调度：从最底层往上涂 */
 function draw() {
   // 本帧的"这一步走了几成"：0 = 刚起步，1 = 已经到位。
-  // 下面所有图形都拿它做一次插值，于是 60 帧里每一帧蛇都在不同的像素上。
-  const t = Math.min(acc / DELAY, 1);
+  // 两条蛇各走各的节拍，所以插值系数也分开算：玩家按 DELAY，电脑按 E_DELAY。
+  const t  = Math.min(acc  / DELAY,   1);
+  const te = Math.min(eAcc / E_DELAY, 1);
 
   drawBoard();
 
@@ -577,7 +650,7 @@ function draw() {
   drawApples();
 
   // 先画电脑、再画玩家：万一两节身体重叠，你的绿蛇压在灰蛇上面，一眼能分清
-  if (E.alive) drawSnake(E, t);
+  if (E.alive) drawSnake(E, te);
   drawSnake(P, t);
 
   if (P.alive) drawScore();
@@ -812,6 +885,27 @@ canvas.addEventListener("touchend", (e) => {
     turn(dy > 0 ? "D" : "U");
   }
 }, { passive: false });
+
+// ============ 九·五、屏幕方向键：手机上的"手柄" ============
+
+// 中间那颗装饰没有 data-dir，所以不会被下面的循环抓到。
+// 用 pointerdown 而不是 click：手指一碰到就立刻转向，比等抬手更跟手。
+document.querySelectorAll(".dpad-btn[data-dir]").forEach((btn) => {
+  const dir = btn.dataset.dir;
+
+  const press = (e) => {
+    e.preventDefault();                    // 阻止当成滑页 / 选字
+    btn.classList.add("pressed");          // 点亮按键，给个按下去的反馈
+    if (!P.alive) { restart(); return; }   // 晕了时按方向键 = 重开，跟点屏幕 / 空格一致
+    turn(dir);                             // 复用转向函数，跟键盘 / 滑屏走同一道门
+  };
+  const release = () => btn.classList.remove("pressed");
+
+  btn.addEventListener("pointerdown", press);
+  btn.addEventListener("pointerup", release);
+  btn.addEventListener("pointercancel", release);
+  btn.addEventListener("pointerleave", release);
+});
 
 // ============ 十、切到别的标签页就自动暂停 ============
 
