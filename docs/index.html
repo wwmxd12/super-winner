@@ -324,22 +324,35 @@ function commitDir() {
   if (!to || to === P.dir) return;                        // 没新指令，或就是当前方向
   if (to !== BACK[P.dir]) { P.dir = to; return; }         // 普通的 90 度拐弯
 
-  // 想 180 度回头：先往一侧迈一步（这步合法），把“真正反向”留到下一步。
-  // 侧向优先级：摇杆直接给的 arc > 键盘额外按住的侧向键 > 自动挑安全一侧。
-  let first = (arc && arc !== P.dir && arc !== to) ? arc : arcFromHeld();
-  if (!first || first === P.dir || first === to) first = pickArc();
-  P.dir = first;
+  // 想 180 度回头：拆成“先往一侧迈一步（这步合法）、下一步再补上反向”。
+  // pref：玩家/摇杆点名的侧向（摇杆 arc 或键盘 held），没点名就是 null。
+  const pref = (arc && arc !== P.dir && arc !== to) ? arc : arcFromHeld();
+  // 关键修复：挑侧向不能只验第一步，第二步（回头落点）也得验，
+  // 否则身子一拐弯，回头第二步就撞进自己身体里 —— 横着走时最容易撞上。
+  P.dir = chooseArc(to, pref);
   P.queue.push(to);
 }
 
-/** 键盘 / 滑屏请求掉头时，自动挑一个“迈出去不会立刻撞死”的侧向 */
-function pickArc() {
+/** 走“先 f 一步、再往 to 一步”这段回转，中途会不会撞（撞墙或撞身子）。
+    用当前局面近似判断（电脑蛇慢一拍，这里当它暂时不动）。 */
+function arcDies(f, to) {
+  const x1 = P.x[0] + DIRV[f][0] * UNIT_SIZE, y1 = P.y[0] + DIRV[f][1] * UNIT_SIZE;
+  if (cellIsDeadly(x1, y1, P)) return true;                    // 第一步落点就撞
+  const x2 = x1 + DIRV[to][0] * UNIT_SIZE, y2 = y1 + DIRV[to][1] * UNIT_SIZE;
+  return cellIsDeadly(x2, y2, P);                              // 第二步（回头）落点撞
+}
+
+/** 给掉头挑“先迈”的侧向：优先听玩家点名的，但前提是它两步都不撞；
+    点名的那侧会撞死就自动换成能活的一侧，两侧都必撞才退回答应玩家。 */
+function chooseArc(to, pref) {
   const l = LTURN[P.dir], r = RTURN[P.dir];
-  const lx = P.x[0] + DIRV[l][0] * UNIT_SIZE, ly = P.y[0] + DIRV[l][1] * UNIT_SIZE;
-  const rx = P.x[0] + DIRV[r][0] * UNIT_SIZE, ry = P.y[0] + DIRV[r][1] * UNIT_SIZE;
-  if (!cellIsDeadly(lx, ly, P)) return l;
-  if (!cellIsDeadly(rx, ry, P)) return r;
-  return l;   // 两边都堵死，那就随便一头（反正要撞了）
+  const lOk = !arcDies(l, to), rOk = !arcDies(r, to);
+  if (pref === l && lOk) return l;                    // 点名左侧且左侧安全
+  if (pref === r && rOk) return r;                    // 点名右侧且右侧安全
+  if (lOk && rOk) return pref === r ? r : l;          // 两侧都能活：没点名默认左转
+  if (lOk) return l;                                  // 只有左侧能活
+  if (rOk) return r;                                  // 只有右侧能活
+  return pref === r ? r : l;                          // 两侧回头都必撞（被身子堵死）：随玩家
 }
 
 /**
@@ -867,7 +880,7 @@ function gameOver(t) {
 // 这样一步之内无论你怎么狂按，都只认最后一个，杜绝“连改两次方向、
 // 却只前进一格 = 瞬间 180 度掉头一头撞脖子”的老 bug。
 // 想 180 度回头也不再是禁忌：交给 commitDir 拆成同向两拐实现。
-// arc：可选，掉头时先迈的侧向（由摇杆给出）；不传则由 pickArc() 自动选安全一侧。
+// arc：可选，掉头时先迈的侧向（由摇杆给出）；不传则由 chooseArc() 在“两步都不撞”的一侧里自动选。
 function turn(to, arc) {
   P.want = to;
   P.wantArc = arc || null;
