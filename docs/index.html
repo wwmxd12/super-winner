@@ -158,8 +158,7 @@ function makeSnake(pal, name) {
     dir: "R",                  // 蛇头朝向：U 上 / D 下 / L 左 / R 右
     alive: true,               // 活着吗
     respawnAt: 0,              // 死了的话，游戏时间到多少毫秒复活
-    want: null,                // 攒着、还没落地的转向意图（U/D/L/R）
-    wantArc: null,             // 掉头时先往哪一侧迈第一步（摇杆横偏决定；键盘为 null）
+    buf: [],                   // 输入缓冲队列：最多存两个待落地的转向意图 {to, arc}
     queue: [],                 // 掉头“两步走”的剩余计划：非空表示回转还没做完
     pal: pal,
     name: name,
@@ -224,8 +223,7 @@ function resetSnake(s, dir, headCol, row) {
   s.score = 0;
   s.alive = true;
   s.respawnAt = 0;
-  s.want = null;
-  s.wantArc = null;
+  s.buf = [];
   s.queue = [];
   placeSnake(s, headCol, row);
   syncPrev(s);   // 开局时"上一步"和"这一步"重合，蛇不会自己飘
@@ -312,17 +310,19 @@ function playerStep() {
 
 /**
  * 每走一步之前，把攒下的转向意图结算成蛇头朝向。
- * 关键：一步之内无论怎么狂按都只认最后一个，这就从根上杜绝了
+ * 关键：一步只落地一个方向，且落地时对着当下真实朝向现判，从根上杜绝了
  * “连改两次方向却只前进一格 = 瞬间 180 度掉头一头撞脖子”的 bug。
  * 普通 90 度转向直接生效；180 度回头则拆成“同向两拐”分两步走完。
  */
 function commitDir() {
   if (P.queue.length > 0) { P.dir = P.queue.shift(); return; }  // 回转未完，按计划推进
 
-  const to = P.want, arc = P.wantArc;
-  P.want = null; P.wantArc = null;
-  if (!to || to === P.dir) return;                        // 没新指令，或就是当前方向
-  if (to !== BACK[P.dir]) { P.dir = to; return; }         // 普通的 90 度拐弯
+  if (P.buf.length === 0) return;                               // 没有待处理输入
+  let req = P.buf.shift();                                      // 取队首（最早排进来的意图）
+  while (req && req.to === P.dir && P.buf.length > 0) req = P.buf.shift();  // 跳过陈旧同向项
+  const to = req.to, arc = req.arc;
+  if (to === P.dir) return;                             // 都是当前方向，空耗一步
+  if (to !== BACK[P.dir]) { P.dir = to; return; }       // 普通的 90 度拐弯
 
   // 想 180 度回头：拆成“先往一侧迈一步（这步合法）、下一步再补上反向”。
   // pref：玩家/摇杆点名的侧向（摇杆 arc 或键盘 held），没点名就是 null。
@@ -876,14 +876,17 @@ function gameOver(t) {
 
 // ============ 八、键盘：把"按了哪个键"翻译成"蛇该往哪走" ============
 
-// 转向意图先攒进 P.want，等下一步真正要走时由 commitDir() 统一落地。
-// 这样一步之内无论你怎么狂按，都只认最后一个，杜绝“连改两次方向、
-// 却只前进一格 = 瞬间 180 度掉头一头撞脖子”的老 bug。
+// 转向意图排进一个最多两格的队列 P.buf，每走一格由 commitDir() 消费队首一个。
+// 安全性不变：队列里的意图仍在“真正要走的那一步”对着当下真实朝向现判、
+// 一步只落一个方向，所以“连改两次却只前进一格 = 瞬间 180 度撞脖子”的老 bug 不会再犯。
 // 想 180 度回头也不再是禁忌：交给 commitDir 拆成同向两拐实现。
 // arc：可选，掉头时先迈的侧向（由摇杆给出）；不传则由 chooseArc() 在“两步都不撞”的一侧里自动选。
 function turn(to, arc) {
-  P.want = to;
-  P.wantArc = arc || null;
+  const last = P.buf[P.buf.length - 1];
+  if (last && last.to === to) return;               // 与队尾同向：自动重复的按键/摇杆，忽略
+  if (P.buf.length === 0 && to === P.dir) return;   // 空队列且就是当前方向，忽略
+  if (P.buf.length >= 2) P.buf.shift();             // 只留最近两格，太旧的挤掉
+  P.buf.push({ to: to, arc: arc || null });
 }
 
 const KEY_MAP = {
