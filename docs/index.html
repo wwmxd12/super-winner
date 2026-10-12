@@ -304,7 +304,7 @@ function playerStep() {
   commitDir();            // 先把攒下的转向意图落实成这一步的朝向（含掉头两步走）
   syncPrev(P);
   advance(P);
-  checkHeadToHead();      // 头对头排在前面判：撞个正着就两个一起晕
+  checkHeadToHead();      // 头对头排在前面判：撞个正着算玩家赢（只死电脑蛇）
   checkCollision(P);
   eatApples(P);
   if (apples.length === 0) spawnApple();
@@ -476,10 +476,11 @@ function checkCollision(s) {
   }
 }
 
-/** 头对头：两条蛇头撞进同一格，两个都不活（谁也别想白捡一条命）*/
+/** 头对头：两条蛇头撞进同一格，按“对撞算玩家赢” —— 只死电脑蛇，玩家蛇没事。
+    （但玩家一头扎进电脑“身子”仍会死，那属于“撞墙”，不在这条规则里。）*/
 function checkHeadToHead() {
   if (!P.alive || !E.alive) return;
-  if (P.x[0] === E.x[0] && P.y[0] === E.y[0]) { kill(P); kill(E); }
+  if (P.x[0] === E.x[0] && P.y[0] === E.y[0]) kill(E);
 }
 
 /** 让一条蛇晕过去。已经晕了的不重复处理，免得苹果撒两遍、最高分存两遍 */
