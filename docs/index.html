@@ -968,8 +968,8 @@ canvas.addEventListener("touchend", (e) => {
 (function () {
   const base = document.getElementById("stick");
   const knob = document.getElementById("stickKnob");
-  const MAX  = 42;   // 把手能被推出去的最大像素（到底盘边缘附近）
-  const DEAD = 16;   // 死区：推这么一点以内不算方向，防手抖误触
+  const MAX  = 36;   // 把手能被推出去的最大像素（调小→手指行程短、轻推就到底，更跟手）
+  const DEAD = 8;    // 死区：推这么一点以内不算方向。调小→更灵敏（原 16，普遍觉得太钝）
   let active = false;
   let lastDir = null;
   let cx = 0, cy = 0;                 // 底盘中心在屏幕上的坐标
