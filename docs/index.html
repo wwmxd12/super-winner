@@ -325,7 +325,9 @@ function commitDir() {
   if (to !== BACK[P.dir]) { P.dir = to; return; }         // 普通的 90 度拐弯
 
   // 想 180 度回头：先往一侧迈一步（这步合法），把“真正反向”留到下一步。
-  const first = (arc && arc !== P.dir && arc !== to) ? arc : pickArc();
+  // 侧向优先级：摇杆直接给的 arc > 键盘额外按住的侧向键 > 自动挑安全一侧。
+  let first = (arc && arc !== P.dir && arc !== to) ? arc : arcFromHeld();
+  if (!first || first === P.dir || first === to) first = pickArc();
   P.dir = first;
   P.queue.push(to);
 }
@@ -877,6 +879,21 @@ const KEY_MAP = {
   ArrowDown: "D", KeyS: "D",
 };
 
+// 当前正被按住的方向键（按下的先后顺序）。掉头时拿它来判断“玩家想往哪一侧绕”：
+// 竖着走想回头时多按住 ←/→、横着走想回头时多按住 ↑/↓，就能指定回转的侧向。
+const held = [];
+function markHeld(dir) { if (dir && held.indexOf(dir) < 0) held.push(dir); }
+function clearHeld(dir) { const i = held.indexOf(dir); if (i >= 0) held.splice(i, 1); }
+
+// 掉头时读“额外按住的那个侧向键”当第一步方向；摇杆走 arc 参数不经这儿，互不影响。
+function arcFromHeld() {
+  for (let i = held.length - 1; i >= 0; i--) {
+    const h = held[i];
+    if (h !== P.dir && h !== BACK[P.dir]) return h;   // 既不是当前朝向也不是它的反向 = 垂直侧向
+  }
+  return null;
+}
+
 document.addEventListener("keydown", (e) => {
   // 方向键和空格在网页里默认会"滚动页面"，必须按住它，不然一按蛇没动、页面先跑了
   if (e.code === "Space" || e.code.startsWith("Arrow")) {
@@ -889,8 +906,14 @@ document.addEventListener("keydown", (e) => {
   }
 
   const dir = KEY_MAP[e.code];
-  if (dir) turn(dir);
+  if (dir) { markHeld(dir); turn(dir); }
 });
+
+// 松手要把键从 held 里摘掉，否则“按住指定侧向”会赖着不走。
+document.addEventListener("keyup", (e) => clearHeld(KEY_MAP[e.code]));
+
+// 切标签页 / 窗口失焦时浏览器不再发 keyup，held 可能卡在按下的状态，这里一律清空兜底。
+window.addEventListener("blur", () => { held.length = 0; });
 
 // ============ 九、触屏：手机上滑一下就算转向 ============
 
