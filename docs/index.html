@@ -255,12 +255,22 @@ function appleIndexAt(x, y) {
   return -1;
 }
 
-/** 在棋盘上随机扔一颗苹果：落到蛇身上或已有苹果的地方就重扔 */
+/** 把落在最外圈（贴墙一圈）的格子往场内挪一格，避免苹果紧贴墙根 */
+function pullInward(x, y) {
+  let nx = x, ny = y;
+  if (y === 0) ny = UNIT_SIZE;                                          // 顶行往下挪
+  else if (y === PANEL_SIZE - UNIT_SIZE) ny = PANEL_SIZE - 2 * UNIT_SIZE; // 底行往上挪
+  if (x === 0) nx = UNIT_SIZE;                                          // 最左列往右挪
+  else if (x === PANEL_SIZE - UNIT_SIZE) nx = PANEL_SIZE - 2 * UNIT_SIZE; // 最右列往左挪
+  return { x: nx, y: ny };
+}
+
+/** 在棋盘上随机扔一颗苹果：只往场内那一圈投，避开贴着墙的格子 */
 function spawnApple() {
   if (apples.length >= MAX_APPLES) return;   // 堆满了就不再补，不然能刷满一盘
   for (let tries = 0; tries < 400; tries++) {
-    const x = rnd(GAME_UNITS) * UNIT_SIZE;
-    const y = rnd(GAME_UNITS) * UNIT_SIZE;
+    const x = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;   // 1~23 列，不贴墙
+    const y = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;   // 1~23 行，不贴墙
     if (!cellBusy(x, y) && appleIndexAt(x, y) < 0) {
       apples.push({ x: x, y: y });
       return;
@@ -466,9 +476,12 @@ function dropApplesOnBody(s) {
     // 撞墙死的时候蛇头那一节是在棋盘外（x 可能是 500 或 -20），
     // 不排掉的话苹果会被撒到屏幕看不见的位置，永远吃不到。
     if (c.x < 0 || c.x >= PANEL_SIZE || c.y < 0 || c.y >= PANEL_SIZE) continue;
-    if (cellBusy(c.x, c.y)) continue;             // 落在活蛇身上就换下一格
-    if (appleIndexAt(c.x, c.y) >= 0) continue;    // 同一格不放两颗
-    apples.push(c);
+    // 撞墙死时蛇身基本贴着墙，苹果会堆在墙根、你一去吃就容易撞墙。
+    // 落在最外圈的就先往场内挪一格再放。
+    const p = pullInward(c.x, c.y);
+    if (cellBusy(p.x, p.y)) continue;             // 落在活蛇身上就换下一格
+    if (appleIndexAt(p.x, p.y) >= 0) continue;    // 同一格不放两颗
+    apples.push(p);
     n--;
   }
 }
