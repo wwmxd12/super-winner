@@ -241,15 +241,18 @@ function tickCannon(dt) {
 /** 按当前 shots/pierce 打出一轮弹幕 */
 function fireVolley() {
   const n = player.shots;
-  const spread = n === 1 ? 0 : 0.16 * (n - 1);   // 多弹时扇形张开一点
-  const mx = player.x + Math.cos(player.aim) * (player.r + 8);
+  const gap = 11;   // 多弹横向间隔：方向完全一致、只是左右并排，飞多远都还是一束，不会散开打空
+  const mx = player.x + Math.cos(player.aim) * (player.r + 8);   // 炮口中心
   const my = CANNON_Y + Math.sin(player.aim) * (player.r + 8);
+  const nx = -Math.sin(player.aim);   // 垂直于瞄准方向的“横向”单位向量，用来左右排开
+  const ny = Math.cos(player.aim);
+  const vx = Math.cos(player.aim) * player.bulletSpeed;           // 所有子弹同向平行
+  const vy = Math.sin(player.aim) * player.bulletSpeed;
   for (let i = 0; i < n; i++) {
-    const a = player.aim + (n === 1 ? 0 : -spread / 2 + spread * (i / (n - 1)));
+    const off = (i - (n - 1) / 2) * gap;                          // 相对中心左右对称排开
     bullets.push({
-      x: mx, y: my,
-      vx: Math.cos(a) * player.bulletSpeed,
-      vy: Math.sin(a) * player.bulletSpeed,
+      x: mx + nx * off, y: my + ny * off,
+      vx: vx, vy: vy,
       dmg: player.dmg, pierce: player.pierce, hit: 0, r: 4,
     });
   }
@@ -327,16 +330,46 @@ function damageWall(amount) {
 
 // ============ 八、升级选卡 ============
 
-// 强化卡池：想加新强化，只在这里多写一条
+// 稀有度分级：N 常见 → R → SR → SSR → UR → EX 神话。w 是抽卡权重（越大越常见）
+const RARITY = [
+  { name: "N",   col: [150, 166, 184], w: 100 },
+  { name: "R",   col: [86, 156, 255],  w: 55  },
+  { name: "SR",  col: [178, 110, 240], w: 26  },
+  { name: "SSR", col: [255, 176, 64],  w: 11  },
+  { name: "UR",  col: [255, 86, 120],  w: 4   },
+  { name: "EX",  col: [64, 224, 208],  w: 2   },
+];
+
+// 强化卡池：同一效果按稀有度分成几档，r 指向 RARITY 下标。想加新强化只在这里多写一条
 const UPGRADES = [
-  { key: "dmg",    title: "火力强化", desc: "单发伤害 +35%",     apply: () => player.dmg *= 1.35 },
-  { key: "rate",   title: "加特林",   desc: "射速 +18%",          apply: () => player.fireInterval = Math.max(70, player.fireInterval * 0.82) },
-  { key: "shot",   title: "多重炮管", desc: "弹幕 +1 发",         apply: () => player.shots += 1 },
-  { key: "spd",    title: "高速弹",   desc: "弹速 +16%",          apply: () => player.bulletSpeed *= 1.16 },
-  { key: "pierce", title: "穿甲弹",   desc: "子弹额外穿透 +1",    apply: () => player.pierce += 1 },
-  { key: "slow",   title: "冰缓立场", desc: "僵尸减速 +8%",       apply: () => player.slowPct = Math.min(70, player.slowPct + 8) },
-  { key: "repair", title: "修补城墙", desc: "城墙回复 30 并加厚", apply: () => { player.maxHp += 12; player.hp = Math.min(player.maxHp, player.hp + 30); } },
-  { key: "hp",     title: "加固城墙", desc: "城墙上限 +30 并回满", apply: () => { player.maxHp += 30; player.hp = Math.min(player.maxHp, player.hp + 30); } },
+  // 伤害
+  { r: 0, title: "火力强化", desc: "单发伤害 +25%",   apply: () => player.dmg *= 1.25 },
+  { r: 1, title: "高爆弹头", desc: "单发伤害 +45%",   apply: () => player.dmg *= 1.45 },
+  { r: 2, title: "湮灭弹头", desc: "单发伤害 +75%",   apply: () => player.dmg *= 1.75 },
+  // 攻速（三档拉开差距）
+  { r: 0, title: "高射炮",   desc: "攻速 +12%",       apply: () => player.fireInterval = Math.max(60, player.fireInterval * 0.89) },
+  { r: 1, title: "加特林",   desc: "攻速 +22%",       apply: () => player.fireInterval = Math.max(60, player.fireInterval * 0.80) },
+  { r: 2, title: "死亡风暴", desc: "攻速 +35%",       apply: () => player.fireInterval = Math.max(60, player.fireInterval * 0.70) },
+  // 子弹飞行速度（新增词条）
+  { r: 0, title: "提速弹匣", desc: "弹速 +18%",       apply: () => player.bulletSpeed *= 1.18 },
+  { r: 2, title: "电磁轨道", desc: "弹速 +40%",       apply: () => player.bulletSpeed *= 1.40 },
+  // 弹幕
+  { r: 1, title: "分裂炮管", desc: "弹幕 +1 发",      apply: () => player.shots += 1 },
+  { r: 2, title: "多重炮管", desc: "弹幕 +2 发",      apply: () => player.shots += 2 },
+  { r: 3, title: "弹幕领域", desc: "弹幕 +3 发",      apply: () => player.shots += 3 },
+  // 穿透
+  { r: 1, title: "穿甲弹",   desc: "穿透 +1",         apply: () => player.pierce += 1 },
+  { r: 3, title: "磁轨贯穿", desc: "穿透 +2",         apply: () => player.pierce += 2 },
+  // 减速
+  { r: 1, title: "冰缓立场", desc: "僵尸减速 +10%",   apply: () => player.slowPct = Math.min(75, player.slowPct + 10) },
+  { r: 3, title: "时间凝滞", desc: "僵尸减速 +22%",   apply: () => player.slowPct = Math.min(75, player.slowPct + 22) },
+  // 城墙
+  { r: 0, title: "修补城墙", desc: "立即回复 35 血",  apply: () => { player.hp = Math.min(player.maxHp, player.hp + 35); } },
+  { r: 1, title: "加固城墙", desc: "上限 +30 并回 30", apply: () => { player.maxHp += 30; player.hp = Math.min(player.maxHp, player.hp + 30); } },
+  { r: 2, title: "合金长城", desc: "上限 +70 并回满", apply: () => { player.maxHp += 70; player.hp = player.maxHp; } },
+  // 顶级组合
+  { r: 4, title: "双管齐下", desc: "弹幕 +2 且攻速 +15%", apply: () => { player.shots += 2; player.fireInterval = Math.max(60, player.fireInterval * 0.87); } },
+  { r: 5, title: "天基裁决", desc: "伤害 +120% 且穿透 +1", apply: () => { player.dmg *= 2.2; player.pierce += 1; } },
 ];
 
 function gainXp(n) {
@@ -349,13 +382,19 @@ function gainXp(n) {
   }
 }
 
-/** 抽出 3 张不重复的强化卡，切到选卡界面（逻辑暂停） */
+/** 按稀有度权重抽 3 张不重复的强化卡（EX 极稀有），切到选卡界面（逻辑暂停） */
 function openLevelUp() {
   cards.length = 0;
   const pool = UPGRADES.slice();
-  for (let i = 0; i < 3 && pool.length; i++) {
-    const u = pool.splice(rnd(pool.length), 1)[0];
-    cards.push(u);
+  for (let k = 0; k < 3 && pool.length; k++) {
+    let total = 0;
+    for (const u of pool) total += RARITY[u.r].w;
+    let roll = Math.random() * total, pick = 0;
+    for (let i = 0; i < pool.length; i++) {
+      roll -= RARITY[pool[i].r].w;
+      if (roll <= 0) { pick = i; break; }
+    }
+    cards.push(pool.splice(pick, 1)[0]);
   }
   layoutCards();
   state = "levelup";
@@ -725,10 +764,22 @@ function drawLevelUp() {
 
   for (let i = 0; i < cards.length; i++) {
     const rc = cards[i].rect;
+    const rar = RARITY[cards[i].r];
     g.fillStyle = rgb(C.card);
     roundRect(rc.x, rc.y, rc.w, rc.h, 10); g.fill();
-    g.strokeStyle = rgb(C.cardEdge, 0.8); g.lineWidth = 2;
+    // 边框按稀有度上色，SSR 及以上描粗一点
+    g.strokeStyle = rgb(rar.col, 0.95); g.lineWidth = cards[i].r >= 3 ? 3 : 2;
     roundRect(rc.x, rc.y, rc.w, rc.h, 10); g.stroke();
+
+    // 右上角稀有度徽章
+    const bw = 36, bh = 22, bx = rc.x + rc.w - bw - 10, by = rc.y + (rc.h - bh) / 2;
+    g.fillStyle = rgb(rar.col, 0.18);
+    roundRect(bx, by, bw, bh, 6); g.fill();
+    g.strokeStyle = rgb(rar.col, 0.9); g.lineWidth = 1.5;
+    roundRect(bx, by, bw, bh, 6); g.stroke();
+    g.fillStyle = rgb(rar.col); g.font = "bold 13px 'Microsoft YaHei'";
+    g.textAlign = "center";
+    g.fillText(rar.name, bx + bw / 2, by + bh / 2 + 1);
 
     g.textAlign = "left";
     g.fillStyle = rgb([255, 255, 255]);

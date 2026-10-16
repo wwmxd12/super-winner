@@ -65,6 +65,7 @@ public class GamePanel extends JPanel implements ActionListener {
     static final Font FONT_TINY  = new Font("Microsoft YaHei", Font.PLAIN, 11);
     static final Font FONT_TITLE = new Font("Microsoft YaHei", Font.BOLD, 40);
     static final Font FONT_SUB   = new Font("Microsoft YaHei", Font.BOLD, 26);
+    static final Font FONT_BADGE = new Font("Microsoft YaHei", Font.BOLD, 14);
 
     // ============ 三、玩家（炮台 + 成长属性）============
     double px, wantX, aim;   // 炮台中心 x、想去的 x、炮管朝向(弧度)
@@ -97,12 +98,44 @@ public class GamePanel extends JPanel implements ActionListener {
     final Timer timer;
     final Random random = new Random();
 
-    // ============ 五、强化卡池：想加新强化只在这里加一列 ============
-    static final String[] U_KEY = {"dmg", "rate", "shot", "spd", "pierce", "slow", "repair", "hp"};
-    static final String[] U_TITLE = {"火力强化", "加特林", "多重炮管", "高速弹", "穿甲弹", "冰缓立场", "修补城墙", "加固城墙"};
+    // ============ 五、稀有度与强化卡池 ============
+    // 稀有度：N 常见 → R → SR → SSR → UR → EX 神话。RAR_W 是抽卡权重（越大越常见）
+    static final String[] RAR_NAME = {"N", "R", "SR", "SSR", "UR", "EX"};
+    static final int[] RAR_W = {100, 55, 26, 11, 4, 2};
+    static final Color[] RAR_COL = {
+        new Color(150, 166, 184), new Color(86, 156, 255), new Color(178, 110, 240),
+        new Color(255, 176, 64),  new Color(255, 86, 120), new Color(64, 224, 208),
+    };
+    // 强化卡池：同一效果按稀有度分几档，U_RAR[i] 指向稀有度下标；applyUpgrade 按 i 分支
+    static final String[] U_TITLE = {
+        "火力强化", "高爆弹头", "湮灭弹头",
+        "高射炮", "加特林", "死亡风暴",
+        "提速弹匣", "电磁轨道",
+        "分裂炮管", "多重炮管", "弹幕领域",
+        "穿甲弹", "磁轨贯穿",
+        "冰缓立场", "时间凝滞",
+        "修补城墙", "加固城墙", "合金长城",
+        "双管齐下", "天基裁决",
+    };
     static final String[] U_DESC = {
-        "单发伤害 +35%", "射速 +18%", "弹幕 +1 发", "弹速 +16%",
-        "子弹额外穿透 +1", "僵尸减速 +8%", "城墙回复 30 并加厚", "城墙上限 +30 并回满",
+        "单发伤害 +25%", "单发伤害 +45%", "单发伤害 +75%",
+        "攻速 +12%", "攻速 +22%", "攻速 +35%",
+        "弹速 +18%", "弹速 +40%",
+        "弹幕 +1 发", "弹幕 +2 发", "弹幕 +3 发",
+        "穿透 +1", "穿透 +2",
+        "僵尸减速 +10%", "僵尸减速 +22%",
+        "立即回复 35 血", "上限 +30 并回 30", "上限 +70 并回满",
+        "弹幕 +2 且攻速 +15%", "伤害 +120% 且穿透 +1",
+    };
+    static final int[] U_RAR = {
+        0, 1, 2,
+        0, 1, 2,
+        0, 2,
+        1, 2, 3,
+        1, 3,
+        1, 3,
+        0, 1, 2,
+        4, 5,
     };
 
     // 三种小实体，各用一个静态内部类装数据（相当于网页版里的对象字面量）
@@ -278,15 +311,18 @@ public class GamePanel extends JPanel implements ActionListener {
 
     private void fireVolley() {
         int n = shots;
-        double spread = (n == 1) ? 0 : 0.16 * (n - 1);
-        double mx = px + Math.cos(aim) * (PR + 8);
+        double gap = 11;                                   // 多弹横向间隔：方向完全一致、只是左右并排，飞多远都还是一束，不会散开打空
+        double mx = px + Math.cos(aim) * (PR + 8);         // 炮口中心
         double my = CANNON_Y + Math.sin(aim) * (PR + 8);
+        double nx = -Math.sin(aim);                        // 垂直于瞄准方向的“横向”单位向量，用来左右排开
+        double ny = Math.cos(aim);
+        double vx = Math.cos(aim) * bulletSpeed;           // 所有子弹同向平行
+        double vy = Math.sin(aim) * bulletSpeed;
         for (int i = 0; i < n; i++) {
-            double a = (n == 1) ? aim : aim - spread / 2 + spread * (i / (double) (n - 1));
+            double off = (i - (n - 1) / 2.0) * gap;        // 相对中心左右对称排开
             Bullet b = new Bullet();
-            b.x = mx; b.y = my;
-            b.vx = Math.cos(a) * bulletSpeed;
-            b.vy = Math.sin(a) * bulletSpeed;
+            b.x = mx + nx * off; b.y = my + ny * off;
+            b.vx = vx; b.vy = vy;
             b.dmg = dmg; b.pierce = pierce; b.hit = 0;
             bullets.add(b);
         }
@@ -370,9 +406,17 @@ public class GamePanel extends JPanel implements ActionListener {
     private void openLevelUp() {
         cardIdx.clear();
         ArrayList<Integer> pool = new ArrayList<>();
-        for (int i = 0; i < U_KEY.length; i++) pool.add(i);
-        for (int i = 0; i < 3 && !pool.isEmpty(); i++) {
-            cardIdx.add(pool.remove(random.nextInt(pool.size())));
+        for (int i = 0; i < U_TITLE.length; i++) pool.add(i);
+        // 按稀有度权重抽 3 张不重复的卡（EX 极稀有）
+        for (int k = 0; k < 3 && !pool.isEmpty(); k++) {
+            int total = 0;
+            for (int idx : pool) total += RAR_W[U_RAR[idx]];
+            int roll = random.nextInt(total), pick = 0;
+            for (int p = 0; p < pool.size(); p++) {
+                roll -= RAR_W[U_RAR[pool.get(p)]];
+                if (roll < 0) { pick = p; break; }
+            }
+            cardIdx.add(pool.remove(pick));
         }
         int cw = 300, ch = 62, gap = 14;
         int totalH = cardIdx.size() * ch + (cardIdx.size() - 1) * gap;
@@ -390,16 +434,28 @@ public class GamePanel extends JPanel implements ActionListener {
         state = PLAYING;
     }
 
-    private void applyUpgrade(int idx) {
-        switch (U_KEY[idx]) {
-            case "dmg"    -> dmg *= 1.35;
-            case "rate"   -> fireInterval = Math.max(70, fireInterval * 0.82);
-            case "shot"   -> shots += 1;
-            case "spd"    -> bulletSpeed *= 1.16;
-            case "pierce" -> pierce += 1;
-            case "slow"   -> slowPct = Math.min(70, slowPct + 8);
-            case "repair" -> { maxHp += 12; hp = Math.min(maxHp, hp + 30); }
-            case "hp"     -> { maxHp += 30; hp = Math.min(maxHp, hp + 30); }
+    private void applyUpgrade(int i) {
+        switch (i) {
+            case 0 -> dmg *= 1.25;
+            case 1 -> dmg *= 1.45;
+            case 2 -> dmg *= 1.75;
+            case 3 -> fireInterval = Math.max(60, fireInterval * 0.89);
+            case 4 -> fireInterval = Math.max(60, fireInterval * 0.80);
+            case 5 -> fireInterval = Math.max(60, fireInterval * 0.70);
+            case 6 -> bulletSpeed *= 1.18;
+            case 7 -> bulletSpeed *= 1.40;
+            case 8 -> shots += 1;
+            case 9 -> shots += 2;
+            case 10 -> shots += 3;
+            case 11 -> pierce += 1;
+            case 12 -> pierce += 2;
+            case 13 -> slowPct = Math.min(75, slowPct + 10);
+            case 14 -> slowPct = Math.min(75, slowPct + 22);
+            case 15 -> hp = Math.min(maxHp, hp + 35);
+            case 16 -> { maxHp += 30; hp = Math.min(maxHp, hp + 30); }
+            case 17 -> { maxHp += 70; hp = maxHp; }
+            case 18 -> { shots += 2; fireInterval = Math.max(60, fireInterval * 0.87); }
+            case 19 -> { dmg *= 2.2; pierce += 1; }
         }
     }
 
@@ -619,11 +675,24 @@ public class GamePanel extends JPanel implements ActionListener {
 
         for (int i = 0; i < cardIdx.size(); i++) {
             int idx = cardIdx.get(i);
+            Color rc = RAR_COL[U_RAR[idx]];
             g2.setColor(CARD_BG);
             g2.fill(new RoundRectangle2D.Double(cardX[i], cardY[i], cardW[i], cardH[i], 12, 12));
-            g2.setColor(withAlpha(CARD_EDGE, 0.8f)); g2.setStroke(new BasicStroke(2));
+            // 边框按稀有度上色，SSR 及以上描粗一点
+            g2.setColor(withAlpha(rc, 0.95f)); g2.setStroke(new BasicStroke(U_RAR[idx] >= 3 ? 3f : 2f));
             g2.draw(new RoundRectangle2D.Double(cardX[i], cardY[i], cardW[i], cardH[i], 12, 12));
+            // 右上角稀有度徽章
+            String rn = RAR_NAME[U_RAR[idx]];
+            int bw = 36, bh = 22, bx = cardX[i] + cardW[i] - bw - 10, by = cardY[i] + (cardH[i] - bh) / 2;
             g2.setStroke(new BasicStroke(1));
+            g2.setColor(withAlpha(rc, 0.18f));
+            g2.fill(new RoundRectangle2D.Double(bx, by, bw, bh, 8, 8));
+            g2.setColor(withAlpha(rc, 0.9f)); g2.setStroke(new BasicStroke(1.5f));
+            g2.draw(new RoundRectangle2D.Double(bx, by, bw, bh, 8, 8));
+            g2.setStroke(new BasicStroke(1));
+            g2.setColor(rc); g2.setFont(FONT_BADGE);
+            g2.drawString(rn, bx + bw / 2 - g2.getFontMetrics().stringWidth(rn) / 2, by + 16);
+            // 标题与描述
             g2.setColor(Color.WHITE); g2.setFont(FONT_HUD);
             g2.drawString((i + 1) + ". " + U_TITLE[idx], cardX[i] + 16, cardY[i] + 26);
             g2.setColor(TEXT_DIM); g2.setFont(FONT_SMALL);
