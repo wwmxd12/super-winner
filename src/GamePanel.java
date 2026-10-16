@@ -141,6 +141,8 @@ public class GamePanel extends JPanel implements ActionListener {
     // 三种小实体，各用一个静态内部类装数据（相当于网页版里的对象字面量）
     static class Zombie {
         double x, y, r, hp, maxHp, spd, wob, flash;
+        double atk, atkMs, atkCd;   // 啃墙伤害 / 间隔 / 距下一口剩余毫秒
+        boolean attacking;          // 是否已抵达城墙开始持续啃墙
         String type;
         Color col;
         int pts;
@@ -259,14 +261,14 @@ public class GamePanel extends JPanel implements ActionListener {
     }
 
     private void spawnZombie(String type) {
-        double br, hpMul, grow, spdMul, pts;
+        double br, hpMul, grow, spdMul, pts, atk, atkMs;
         Color col;
-        // 开局按“几发打死”分档（最小1发·绿1发·紫2发·红7发），grow 为该类型随波次的血量增长率
+        // 抵达城墙会停下持续啃墙、不再自爆，会堆积 → 血量可更高；atk/atkMs 是啃墙一下的伤害与间隔
         switch (type) {
-            case "runner" -> { br = 11; hpMul = 4;  grow = 0.03; spdMul = 1.9;  pts = 15; col = Z_RUNNER; }
-            case "tank"   -> { br = 22; hpMul = 10; grow = 0.25; spdMul = 0.62; pts = 30; col = Z_TANK; }
-            case "boss"   -> { br = 38; hpMul = 40; grow = 0.25; spdMul = 0.5;  pts = 300; col = Z_BOSS; }
-            default       -> { br = 15; hpMul = 5;  grow = 0.25; spdMul = 1.0;  pts = 10; col = Z_WALKER; }
+            case "runner" -> { br = 11; hpMul = 5;  grow = 0.06; spdMul = 1.9;  atk = 2;  atkMs = 800;  pts = 15; col = Z_RUNNER; }
+            case "tank"   -> { br = 22; hpMul = 16; grow = 0.32; spdMul = 0.62; atk = 8;  atkMs = 1200; pts = 30; col = Z_TANK; }
+            case "boss"   -> { br = 38; hpMul = 90; grow = 0.32; spdMul = 0.5;  atk = 22; atkMs = 900;  pts = 300; col = Z_BOSS; }
+            default       -> { br = 15; hpMul = 7;  grow = 0.32; spdMul = 1.0;  atk = 3;  atkMs = 1000; pts = 10; col = Z_WALKER; }
         }
         Zombie z = new Zombie();
         z.type = type;
@@ -274,7 +276,8 @@ public class GamePanel extends JPanel implements ActionListener {
         z.x = rand(30, W - 30);
         z.y = -z.r;
         z.hp = z.maxHp = hpMul * (1 + (wave - 1) * grow);   // 血量 = 基础 ×（1 + 已过波数 × 增长率）
-        z.spd = rand(50, 70) * spdMul;   // 基础下压速度 * 类型倍率（整体提速）
+        z.spd = rand(50, 70) * spdMul;   // 基础下压速度 * 类型倍率
+        z.atk = atk; z.atkMs = atkMs; z.attacking = false; z.atkCd = 0;
         z.wob = rand(0, 6.28);
         z.flash = 0;
         z.col = col;
@@ -311,18 +314,18 @@ public class GamePanel extends JPanel implements ActionListener {
 
     private void fireVolley() {
         int n = shots;
-        double gap = 11;                                   // 多弹横向间隔：方向完全一致、只是左右并排，飞多远都还是一束，不会散开打空
+        double gap = 8;      // 炮口横向排布间隔：让多发看起来像几根并排炮管
+        double fan = 0.04;   // 每发之间的微小张角(弧度)：有一点散但不大，避免全叠一点太超标
         double mx = px + Math.cos(aim) * (PR + 8);         // 炮口中心
         double my = CANNON_Y + Math.sin(aim) * (PR + 8);
         double nx = -Math.sin(aim);                        // 垂直于瞄准方向的“横向”单位向量，用来左右排开
         double ny = Math.cos(aim);
-        double vx = Math.cos(aim) * bulletSpeed;           // 所有子弹同向平行
-        double vy = Math.sin(aim) * bulletSpeed;
         for (int i = 0; i < n; i++) {
-            double off = (i - (n - 1) / 2.0) * gap;        // 相对中心左右对称排开
+            double k = i - (n - 1) / 2.0;                  // 相对中心的序号偏移（…-1,0,1…）
+            double a = aim + k * fan;                      // 在瞄准方向上轻轻张开一点
             Bullet b = new Bullet();
-            b.x = mx + nx * off; b.y = my + ny * off;
-            b.vx = vx; b.vy = vy;
+            b.x = mx + nx * k * gap; b.y = my + ny * k * gap;
+            b.vx = Math.cos(a) * bulletSpeed; b.vy = Math.sin(a) * bulletSpeed;
             b.dmg = dmg; b.pierce = pierce; b.hit = 0;
             bullets.add(b);
         }
@@ -353,18 +356,23 @@ public class GamePanel extends JPanel implements ActionListener {
         double slow = 1 - slowPct / 100;
         for (int i = zombies.size() - 1; i >= 0; i--) {
             Zombie z = zombies.get(i);
-            z.y += z.spd * slow * dt / 1000;
-            z.wob += dt / 1000 * 6;
             if (z.flash > 0) z.flash -= dt;
-            if (z.y + z.r >= WALL_Y) {
-                int bite = switch (z.type) {
-                    case "boss" -> 26;
-                    case "tank" -> 12;
-                    default -> 7;
-                };
-                damageWall(bite);
-                burst(z.x, WALL_Y, new Color(190, 60, 70), 10);
-                zombies.remove(i);
+            if (!z.attacking) {
+                z.y += z.spd * slow * dt / 1000;
+                z.wob += dt / 1000 * 6;
+                // 抵达城墙前一点：停下开始持续啃墙（不再自爆），必须被击杀才停止
+                if (z.y + z.r >= WALL_Y) {
+                    z.y = WALL_Y - z.r - rand(0, 14);
+                    z.attacking = true;
+                    z.atkCd = 400;
+                }
+            } else {
+                z.atkCd -= dt;
+                if (z.atkCd <= 0) {
+                    z.atkCd = z.atkMs;
+                    damageWall((int) z.atk, false);
+                    burst(z.x, WALL_Y, new Color(190, 60, 70), 2);
+                }
             }
         }
     }
@@ -380,15 +388,15 @@ public class GamePanel extends JPanel implements ActionListener {
         score += z.pts;
         kills++;
         burst(z.x, z.y, z.col, z.type.equals("boss") ? 26 : 12);
-        gainXp(z.type.equals("boss") ? 8 : 1);
+        gainXp(z.type.equals("boss") ? 25 : 1);   // Boss 给一大笔经验，击杀奖励拉满
         if (z.type.equals("boss")) shake = Math.max(shake, 10);
         zombies.remove(index);
     }
 
-    private void damageWall(int amount) {
+    private void damageWall(int amount, boolean showText) {
         hp -= amount;
-        shake = Math.max(shake, 7);
-        floatUp(W / 2, WALL_Y - 12, "-" + amount, HP_LOW, 16);
+        shake = Math.max(shake, showText ? 7 : 3);
+        if (showText) floatUp(W / 2, WALL_Y - 12, "-" + amount, HP_LOW, 16);
         if (hp <= 0) { hp = 0; gameOver(); }
     }
 

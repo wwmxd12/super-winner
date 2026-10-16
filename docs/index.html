@@ -86,13 +86,13 @@ const rgb = (c, a) => (a === undefined)
   ? `rgb(${c[0]}, ${c[1]}, ${c[2]})`
   : `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a})`;
 
-// 僵尸种类：r 体型 / hp 开局基础血量 / grow 每过一波的血量增长率 / spd 速度倍率
-// 设计：开局按“几发打死”分档（最小1发·绿1发·紫2发·红7发），之后各类型按自己节奏随波次变硬
+// 僵尸种类：r 体型 / hp 开局基础血量 / grow 每波血量增长率 / spd 速度倍率 / atk 啃墙一下的伤害 / atkMs 啃墙间隔
+// 新机制：僵尸抵达城墙前会停下持续啃墙、不再自爆，以会堆积 → 必须击杀才止得住 → 所以血量可以做得更高
 const ZTYPE = {
-  runner: { r: 11, hp: 4,  grow: 0.03, spd: 1.9,  col: [208, 150, 70], pts: 15 },
-  walker: { r: 15, hp: 5,  grow: 0.25, spd: 1.0,  col: [96, 176, 92],  pts: 10 },
-  tank:   { r: 22, hp: 10, grow: 0.25, spd: 0.62, col: [150, 84, 170], pts: 30 },
-  boss:   { r: 38, hp: 40, grow: 0.25, spd: 0.5,  col: [220, 72, 84],  pts: 300 },
+  runner: { r: 11, hp: 5,  grow: 0.06, spd: 1.9,  atk: 2,  atkMs: 800,  col: [208, 150, 70], pts: 15 },
+  walker: { r: 15, hp: 7,  grow: 0.32, spd: 1.0,  atk: 3,  atkMs: 1000, col: [96, 176, 92],  pts: 10 },
+  tank:   { r: 22, hp: 16, grow: 0.32, spd: 0.62, atk: 8,  atkMs: 1200, col: [150, 84, 170], pts: 30 },
+  boss:   { r: 38, hp: 90, grow: 0.32, spd: 0.5,  atk: 22, atkMs: 900,  col: [220, 72, 84],  pts: 300 },
 };
 
 // ============ 三、画布：相当于 Java 里那个 JPanel ============
@@ -181,7 +181,9 @@ function spawnZombie(type) {
     x: x, y: -t.r,
     r: t.r, type: type,
     hp: hpNow, maxHp: hpNow,
-    spd: rand(50, 70) * t.spd,   // 基础下压速度 * 类型倍率（整体提速，不再慢吞吞）
+    spd: rand(50, 70) * t.spd,   // 基础下压速度 * 类型倍率
+    atk: t.atk, atkMs: t.atkMs,  // 抵达城墙后的持续攻击伤害与间隔
+    attacking: false, atkCd: 0,  // 是否已在啃墙 / 距下一口剩下的毫秒
     wob: rand(0, 6.28),          // 走路左右摇摆的相位，纯表演
     flash: 0,
   });
@@ -242,18 +244,19 @@ function tickCannon(dt) {
 /** 按当前 shots/pierce 打出一轮弹幕 */
 function fireVolley() {
   const n = player.shots;
-  const gap = 11;   // 多弹横向间隔：方向完全一致、只是左右并排，飞多远都还是一束，不会散开打空
+  const gap = 8;      // 炮口横向排布间隔：让多发看起来像几根并排炮管
+  const fan = 0.04;   // 每发之间的微小张角(弧度)：有一点散但不大，避免全叠一点太超标
   const mx = player.x + Math.cos(player.aim) * (player.r + 8);   // 炮口中心
   const my = CANNON_Y + Math.sin(player.aim) * (player.r + 8);
   const nx = -Math.sin(player.aim);   // 垂直于瞄准方向的“横向”单位向量，用来左右排开
   const ny = Math.cos(player.aim);
-  const vx = Math.cos(player.aim) * player.bulletSpeed;           // 所有子弹同向平行
-  const vy = Math.sin(player.aim) * player.bulletSpeed;
   for (let i = 0; i < n; i++) {
-    const off = (i - (n - 1) / 2) * gap;                          // 相对中心左右对称排开
+    const k = i - (n - 1) / 2;                                  // 相对中心的序号偏移（…-1,0,1…）
+    const a = player.aim + k * fan;                             // 在瞄准方向上轻轻张开一点
     bullets.push({
-      x: mx + nx * off, y: my + ny * off,
-      vx: vx, vy: vy,
+      x: mx + nx * k * gap, y: my + ny * k * gap,
+      vx: Math.cos(a) * player.bulletSpeed,
+      vy: Math.sin(a) * player.bulletSpeed,
       dmg: player.dmg, pierce: player.pierce, hit: 0, r: 4,
     });
   }
@@ -288,15 +291,25 @@ function tickZombies(dt) {
   const slow = 1 - player.slowPct / 100;   // 减速光环全局系数
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
-    z.y += z.spd * slow * dt / 1000;
-    z.wob += dt / 1000 * 6;
     if (z.flash > 0) z.flash -= dt;
-    // 越过城墙线：啃墙一口，自己化作血浆消失
-    if (z.y + z.r >= WALL_Y) {
-      const bite = z.type === "boss" ? 26 : z.type === "tank" ? 12 : 7;
-      damageWall(bite);
-      burst(z.x, WALL_Y, [190, 60, 70], 10);
-      zombies.splice(i, 1);
+    if (!z.attacking) {
+      // 还在往下压
+      z.y += z.spd * slow * dt / 1000;
+      z.wob += dt / 1000 * 6;
+      // 抵达城墙前一点：停下开始持续啃墙（不再自爆），必须被击杀才停止
+      if (z.y + z.r >= WALL_Y) {
+        z.y = WALL_Y - z.r - rand(0, 14);   // 留点高低差，堆在墙根不至于完全重叠
+        z.attacking = true;
+        z.atkCd = 400;
+      }
+    } else {
+      // 持续攻击：到点就啃一口，僵尸不消失
+      z.atkCd -= dt;
+      if (z.atkCd <= 0) {
+        z.atkCd = z.atkMs;
+        damageWall(z.atk, false);
+        burst(z.x, WALL_Y, [190, 60, 70], 2);
+      }
     }
   }
 }
@@ -314,15 +327,15 @@ function killZombie(z, index) {
   score += t.pts;
   kills++;
   burst(z.x, z.y, t.col, z.type === "boss" ? 26 : 12);
-  gainXp(z.type === "boss" ? 8 : 1);
+  gainXp(z.type === "boss" ? 25 : 1);   // Boss 给一大笔经验，击杀奖励拉满
   if (z.type === "boss") player.shake = Math.max(player.shake, 10);
   zombies.splice(index, 1);
 }
 
-function damageWall(amount) {
+function damageWall(amount, showText) {
   player.hp -= amount;
-  player.shake = Math.max(player.shake, 7);
-  floatUp(W / 2, WALL_Y - 12, "-" + amount, [240, 96, 96], 16);
+  player.shake = Math.max(player.shake, showText ? 7 : 3);
+  if (showText) floatUp(W / 2, WALL_Y - 12, "-" + amount, [240, 96, 96], 16);
   if (player.hp <= 0) {
     player.hp = 0;
     gameOver();
