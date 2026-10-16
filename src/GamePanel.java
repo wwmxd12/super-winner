@@ -232,7 +232,6 @@ public class GamePanel extends JPanel implements ActionListener {
     }
 
     // ---- 波次与出场 ----
-    private double waveHp() { return 1 + (wave - 1) * 0.32; }
     private double spawnGap() { return Math.max(260, 1050 - wave * 68); }
 
     private void tickWave(double dt) {
@@ -260,21 +259,22 @@ public class GamePanel extends JPanel implements ActionListener {
     }
 
     private void spawnZombie(String type) {
-        double br, hpMul, spdMul, pts;
+        double br, hpMul, grow, spdMul, pts;
         Color col;
+        // 开局按“几发打死”分档（最小1发·绿1发·紫2发·红7发），grow 为该类型随波次的血量增长率
         switch (type) {
-            case "runner" -> { br = 11; hpMul = 0.6; spdMul = 1.9; pts = 15; col = Z_RUNNER; }
-            case "tank"   -> { br = 22; hpMul = 3.4; spdMul = 0.62; pts = 30; col = Z_TANK; }
-            case "boss"   -> { br = 38; hpMul = 20;  spdMul = 0.5;  pts = 300; col = Z_BOSS; }
-            default       -> { br = 15; hpMul = 1.0; spdMul = 1.0;  pts = 10; col = Z_WALKER; }
+            case "runner" -> { br = 11; hpMul = 4;  grow = 0.03; spdMul = 1.9;  pts = 15; col = Z_RUNNER; }
+            case "tank"   -> { br = 22; hpMul = 10; grow = 0.25; spdMul = 0.62; pts = 30; col = Z_TANK; }
+            case "boss"   -> { br = 38; hpMul = 40; grow = 0.25; spdMul = 0.5;  pts = 300; col = Z_BOSS; }
+            default       -> { br = 15; hpMul = 5;  grow = 0.25; spdMul = 1.0;  pts = 10; col = Z_WALKER; }
         }
         Zombie z = new Zombie();
         z.type = type;
         z.r = br;
         z.x = rand(30, W - 30);
         z.y = -z.r;
-        z.hp = z.maxHp = hpMul * waveHp();
-        z.spd = rand(38, 52) * spdMul;
+        z.hp = z.maxHp = hpMul * (1 + (wave - 1) * grow);   // 血量 = 基础 ×（1 + 已过波数 × 增长率）
+        z.spd = rand(50, 70) * spdMul;   // 基础下压速度 * 类型倍率（整体提速）
         z.wob = rand(0, 6.28);
         z.flash = 0;
         z.col = col;

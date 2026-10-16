@@ -86,12 +86,13 @@ const rgb = (c, a) => (a === undefined)
   ? `rgb(${c[0]}, ${c[1]}, ${c[2]})`
   : `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a})`;
 
-// 僵尸种类：颜色 + 体型 + 基础血量倍率 + 速度倍率，加新怪只在这里多写一行
+// 僵尸种类：r 体型 / hp 开局基础血量 / grow 每过一波的血量增长率 / spd 速度倍率
+// 设计：开局按“几发打死”分档（最小1发·绿1发·紫2发·红7发），之后各类型按自己节奏随波次变硬
 const ZTYPE = {
-  walker: { r: 15, hp: 1.0, spd: 1.0, col: [96, 176, 92],  pts: 10 },
-  runner: { r: 11, hp: 0.6, spd: 1.9, col: [208, 150, 70], pts: 15 },
-  tank:   { r: 22, hp: 3.4, spd: 0.62, col: [150, 84, 170], pts: 30 },
-  boss:   { r: 38, hp: 20,  spd: 0.5,  col: [220, 72, 84],  pts: 300 },
+  runner: { r: 11, hp: 4,  grow: 0.03, spd: 1.9,  col: [208, 150, 70], pts: 15 },
+  walker: { r: 15, hp: 5,  grow: 0.25, spd: 1.0,  col: [96, 176, 92],  pts: 10 },
+  tank:   { r: 22, hp: 10, grow: 0.25, spd: 0.62, col: [150, 84, 170], pts: 30 },
+  boss:   { r: 38, hp: 40, grow: 0.25, spd: 0.5,  col: [220, 72, 84],  pts: 300 },
 };
 
 // ============ 三、画布：相当于 Java 里那个 JPanel ============
@@ -158,8 +159,6 @@ const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
 
 // ============ 五、波次与出场 ============
 
-/** 当前波每只僵尸的血量倍率：越往后越硬 */
-function waveHp()   { return 1 + (wave - 1) * 0.32; }
 /** 出场间隔（毫秒）：波数越高催得越紧 */
 function spawnGap() { return Math.max(260, 1050 - wave * 68); }
 
@@ -176,11 +175,13 @@ function pickType() {
 function spawnZombie(type) {
   const t = ZTYPE[type];
   const x = rand(30, W - 30);
+  // 血量 = 基础血量 ×（1 + 已过波数 × 该类型增长率）：开局按类型分档，之后各类型按自己节奏变硬
+  const hpNow = t.hp * (1 + (wave - 1) * t.grow);
   zombies.push({
     x: x, y: -t.r,
     r: t.r, type: type,
-    hp: t.hp * waveHp(), maxHp: t.hp * waveHp(),
-    spd: rand(38, 52) * t.spd,   // 基础下压速度 * 类型倍率
+    hp: hpNow, maxHp: hpNow,
+    spd: rand(50, 70) * t.spd,   // 基础下压速度 * 类型倍率（整体提速，不再慢吞吞）
     wob: rand(0, 6.28),          // 走路左右摇摆的相位，纯表演
     flash: 0,
   });
