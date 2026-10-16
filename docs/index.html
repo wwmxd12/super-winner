@@ -3,63 +3,37 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>贪吃蛇 Snake</title>
+<title>向僵尸开炮 Shoot the Zombies</title>
 <style>
   /* 页面外壳：把画布居中，底色跟游戏里保持一致 */
   html, body {
     margin: 0;
     height: 100%;
-    background: #0b0d0b;
+    background: #0a0c10;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-    color: #9fb89a;
+    color: #a9b6c4;
     /* 手机上别让滑动页面把游戏滚走 */
     overscroll-behavior: none;
   }
   canvas {
-    /* 逻辑尺寸永远是 500x500，这里只是把它"显示"成多大：
-       屏幕宽就用 500，屏幕窄（手机）就缩到 92% 宽，正方形比例不变 */
-    width: min(500px, 92vw);
-    height: min(500px, 92vw);
-    border-radius: 12px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, .6);
+    /* 逻辑尺寸永远是 480x640（竖屏）。窄屏手机上按宽度缩、桌面按高度缩，
+       始终保住 3:4 的正经比例，不会被拉扁 */
+    width: min(480px, 96vw, 72vh * 1.25);
+    height: min(640px, 128vw, 96vh);
+    aspect-ratio: 480 / 640;
+    border-radius: 14px;
+    box-shadow: 0 12px 44px rgba(0, 0, 0, .65);
     touch-action: none; /* 交给 JS 自己处理触摸，浏览器不要插手 */
+    cursor: crosshair;
   }
-  .hint { margin-top: 14px; font-size: 13px; text-align: center; line-height: 1.7; }
-  .hint b { color: #cfe8c8; font-weight: 600; }
+  .hint { margin-top: 12px; font-size: 13px; text-align: center; line-height: 1.7; max-width: 92vw; }
+  .hint b { color: #d7e6f2; font-weight: 600; }
   /* 调试读数：等宽字 + 淡一点，不跟游戏抢眼神 */
-  #fps { margin-top: 6px; font-family: Consolas, monospace; font-size: 12px; color: #5f7a5a; }
-
-  /* 虚拟摇杆：给手机一个"手柄"，手指推着把手往哪走，蛇就朝那个方向拐 */
-  .stick {
-    display: none;               /* 默认不显示，只在触屏 / 窄屏出现（见下面媒体查询） */
-    width: 140px;
-    height: 140px;
-    margin-top: 20px;
-    border-radius: 50%;
-    background: radial-gradient(circle, rgba(126, 235, 96, .10), rgba(126, 235, 96, .03));
-    border: 1px solid rgba(126, 235, 96, .18);
-    align-items: center;
-    justify-content: center;
-    touch-action: none;          /* 拖动时别让浏览器当成滑页面 */
-    user-select: none;
-    -webkit-user-select: none;
-  }
-  .stick-knob {
-    width: 60px;
-    height: 60px;
-    border-radius: 50%;
-    background: rgba(126, 235, 96, .32);
-    box-shadow: inset 0 0 10px rgba(0, 0, 0, .3);
-    pointer-events: none;        /* 触摸事件全交给底盘，把手只负责跟着走 */
-  }
-  /* 手机平板（粗指针）或窗口很窄时才亮出摇杆；桌面用键盘就眼不见心不烦 */
-  @media (pointer: coarse), (max-width: 600px) {
-    .stick { display: flex; }
-  }
+  #fps { margin-top: 4px; font-family: Consolas, monospace; font-size: 12px; color: #4a5a68; }
 </style>
 </head>
 <body>
@@ -67,1146 +41,771 @@
 <canvas id="game"></canvas>
 
 <p class="hint">
-  <b>方向键</b> 或 <b>WASD</b> 控制 · <b>空格</b> 重开 · 手机<b>滑动</b>或用下方<b>摇杆</b><br>
-  灰黑那条是<b>电脑蛇</b>：比你<b>慢两成</b>、还会<b>偶尔走神</b>，跟你抢苹果、撞墙撞身子都会晕；<br>
-  它晕了会把吃过的苹果撒回自己身上，<b>5 秒</b>后重新上场<br>
-  盘子里偶尔会冒出一颗<b>金苹果</b>：谁吃到谁 <b>6 秒无敌</b>，除了撞墙都不死，还能把对方一头撞晕
+  <b>电脑</b>：左右移动鼠标 / <b>A D</b> 或 <b>←→</b> 平移炮台，自动瞄准开火 · <b>空格</b> 开始/重开<br>
+  <b>手机</b>：手指在屏幕上<b>左右拖动</b>就带着炮台走，松开继续自动开火<br>
+  僵尸一波波从<b>上方</b>涌下来，冲到<b>城墙</b>就掉血；打怪攒<b>经验</b>，<b>升级</b>时三张强化卡选一张，越打越猛<br>
+  每隔几波会杀出一只<b>巨型 Boss</b>，撑到算你狠
 </p>
 <p id="fps">读数初始化中…</p>
-
-<!-- 虚拟摇杆：手机画布下方的圆形摇杆，滑屏之外的第二种操作方式 -->
-<div class="stick" id="stick">
-  <div class="stick-knob" id="stickKnob"></div>
-</div>
 
 <script>
 "use strict";
 
 /* =====================================================================
-   这份代码是 GamePanel.java 的"网页孪生版"。
-   方法名、变量名、执行顺序都刻意跟 Java 那份一一对应，
-   方便你拿两边对照着读：看懂一个，就看懂了另一个。
+   《向僵尸开炮》—— 底部炮台自动索敌，僵尸从上往下涌的竖屏割草射击。
+   这份是 GamePanel.java 的"网页孪生版"，方法名、执行顺序刻意跟 Java 那份
+   一一对应，方便你拿两边对照着读。
    ===================================================================== */
 
-// ============ 一、棋盘的物理设定（和 Java 版完全一样的四个数字）============
-const UNIT_SIZE  = 20;                        // 一个格子边长 20 像素
-const GAME_UNITS = 25;                        // 横竖各 25 个格子
-const PANEL_SIZE = UNIT_SIZE * GAME_UNITS;    // 所以画布是 500 x 500
-const DELAY      = 144;                       // 玩家每隔 144 毫秒走一步（越小越快；原 130，整体放慢约 10% = 130/0.9）
-
-// 下面几个是加了电脑蛇之后的"规则数字"，想调难度只改这里
-const START_PARTS = 6;      // 开局几节身体：玩家和电脑一模一样
-const RESPAWN_MS  = 5000;   // 电脑蛇死后隔多少毫秒复活
-const MAX_APPLES  = 12;     // 棋盘上同时最多几颗苹果（防止电脑反复死把盘子堆满）
-const SLOW_F      = 0.8;    // 电脑蛇速度 = 玩家的几成（0.8 = 比玩家慢 20%）
-const E_DELAY     = Math.round(DELAY / SLOW_F); // 电脑蛇每格毫秒数（更慢 → 数值更大）
-
-// 超级金苹果（吃了无敌）相关的“规则数字”，想调频率/时长只改这里
-const GOLDEN_FIRST  = 7000;   // 开局多久后出现第一颗金苹果（毫秒）
-const GOLDEN_MS     = 15000;  // 金苹果被吃后，隔多久再冒下一颗（毫秒）
-const INVINCIBLE_MS = 6000;   // 吃到金苹果后的无敌时长（毫秒）
-const AI_DITZY    = 0.2;    // 电脑蛇每步"走神"的概率：越大越笨，越不死咬着你
+// ============ 一、战场的物理设定 ============
+const W = 480;          // 逻辑宽（像素）
+const H = 640;          // 逻辑高
+const WALL_Y = H - 56;  // 城墙顶沿的 y：僵尸越过这条线就啃墙
+const CANNON_Y = WALL_Y + 6; // 炮台基座贴在城墙上方一点
 
 // ============ 二、配色表：想换造型只改这里 ============
 const C = {
-  bgDark:    [14, 16, 14],   // 棋盘格深的那一格
-  bgLight:   [24, 28, 24],   // 棋盘格浅的那一格
-  apple:     [255, 88, 96],  // 苹果本体
-  appleShine:[255, 190, 195],// 苹果高光
-  leaf:      [126, 214, 96], // 苹果叶子
-  eyeWhite:  [255, 255, 255],// 眼白
-  pupil:     [40, 40, 40],   // 瞳孔
-  gold:      [255, 208, 70],  // 金苹果本体
-  goldShine: [255, 245, 200], // 金苹果高光
+  skyTop:   [16, 20, 28],
+  skyBot:   [26, 32, 44],
+  grid:     [40, 50, 66],
+  wallTop:  [88, 98, 116],
+  wallBody: [54, 62, 78],
+  cannon:   [120, 170, 232],
+  cannonDark:[54, 96, 158],
+  barrel:   [206, 224, 248],
+  muzzle:   [255, 226, 128],
+  bullet:   [255, 214, 92],
+  hp:       [92, 220, 130],
+  hpLow:    [240, 96, 96],
+  xp:       [122, 196, 255],
+  textDim:  [150, 166, 184],
+  card:     [30, 38, 52],
+  cardEdge: [120, 170, 232],
 };
+const rgb = (c, a) => (a === undefined)
+  ? `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+  : `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a})`;
 
-// 每条蛇一套配色。画身体的代码只写一遍，颜色由传进去的这套决定，
-// 所以"给电脑蛇换个颜色"= 只改下面其中一行。
-const PAL_P = {             // 玩家：嫩绿
-  head: [126, 235, 96], bodyMid: [92, 210, 70], bodyDark: [46, 170, 32],
-  tongue: [255, 120, 150],
+// 僵尸种类：颜色 + 体型 + 基础血量倍率 + 速度倍率，加新怪只在这里多写一行
+const ZTYPE = {
+  walker: { r: 15, hp: 1.0, spd: 1.0, col: [96, 176, 92],  pts: 10 },
+  runner: { r: 11, hp: 0.6, spd: 1.9, col: [208, 150, 70], pts: 15 },
+  tank:   { r: 22, hp: 3.4, spd: 0.62, col: [150, 84, 170], pts: 30 },
+  boss:   { r: 38, hp: 20,  spd: 0.5,  col: [220, 72, 84],  pts: 300 },
 };
-const PAL_E = {             // 电脑：灰黑
-  // 注意别真用纯黑：底色本来就是近黑的深绿，纯黑蛇会糊成一片看不见。
-  // 用"银灰 → 炭灰"这一档，既是你说的灰黑，又跟背景分得开。
-  head: [178, 186, 194], bodyMid: [120, 128, 137], bodyDark: [72, 78, 86],
-  tongue: [206, 96, 112],
-};
-// 网页里"改一个颜色"比 Java 方便：不用 new，直接拿数组描述，用的时候再拼成字符串
-const rgb = (c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
 
 // ============ 三、画布：相当于 Java 里那个 JPanel ============
 const canvas = document.getElementById("game");
 const g = canvas.getContext("2d");
 
-// 高分屏适配：笔记本/手机屏幕一个 CSS 像素可能对应 2~3 个真实像素点。
-// 把画布的"真实分辨率"放大 DPR 倍，再把笔整体缩放 DPR 倍，
-// 于是我们照样在 0~500 的坐标系里画画，但边缘不会糊。
-// （Java 版没有这一步，因为 Swing 的窗口本来就是原生分辨率。）
+// 高分屏适配：把画布真实分辨率放大 DPR 倍再缩放笔，坐标系照旧 0~W / 0~H，边缘不糊。
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
-canvas.width  = PANEL_SIZE * DPR;
-canvas.height = PANEL_SIZE * DPR;
+canvas.width = W * DPR;
+canvas.height = H * DPR;
 g.scale(DPR, DPR);
 
-// 抗锯齿：Java 版要手动 setRenderingHint 打开，Canvas 是**默认就开着**的，白捡。
+// ============ 四、玩家（炮台 + 一堆成长属性）============
+const player = {
+  x: W / 2, wantX: W / 2, r: 20,   // 炮台中心 x、想去的 x、碰撞半径
+  aim: -Math.PI / 2,               // 炮管朝向（弧度，-90°=正上方）
 
-// ============ 四、两条蛇的数据 ============
-// 原来只有一个玩家，变量直接摊在外面（snakeX / bodyParts / …）。
-// 现在加了电脑蛇，就把它打包成一个对象：两条蛇形状完全相同，
-// 于是"移动 / 撞墙 / 吃苹果 / 画身体"这些代码只写一遍，两条蛇共用。
-function makeSnake(pal, name) {
-  const N = GAME_UNITS * GAME_UNITS;
-  return {
-    x: new Array(N).fill(0),   // 每节的格坐标（存的是像素值，都是 20 的整数倍）
-    y: new Array(N).fill(0),
-    px: new Array(N).fill(0),  // 【丝滑的关键】上一步的格坐标快照，插值用
-    py: new Array(N).fill(0),
-    parts: START_PARTS,        // 现在有几节
-    score: 0,                  // 吃了几颗苹果 = 得分
-    dir: "R",                  // 蛇头朝向：U 上 / D 下 / L 左 / R 右
-    alive: true,               // 活着吗
-    respawnAt: 0,              // 死了的话，游戏时间到多少毫秒复活
-    invUntil: 0,               // 无敌到 gameMs 多少毫秒为止（吃到金苹果才有）
-    buf: [],                   // 输入缓冲队列：最多存两个待落地的转向意图 {to, arc}
-    queue: [],                 // 掉头“两步走”的剩余计划：非空表示回转还没做完
-    arcTries: 0,               // 回转第二步因落点变致命而直行等位的连续次数
-    pal: pal,
-    name: name,
-  };
-}
+  hp: 100, maxHp: 100,             // 城墙血量
+  dmg: 6,                          // 单发子弹伤害
+  fireInterval: 320,               // 每多少毫秒开一炮（越小越快）
+  bulletSpeed: 460,                // 子弹速度 px/s
+  shots: 1,                        // 一次散射几发
+  pierce: 0,                       // 一发子弹能额外穿几个怪
+  slowPct: 0,                      // 减速光环：全场僵尸慢百分之几
 
-const P = makeSnake(PAL_P, "玩家");   // 你
-const E = makeSnake(PAL_E, "电脑");   // 对手：长度、起步节数跟 P 一样，但慢 20%、还偶尔走神
+  xp: 0, level: 1, xpNext: 12,     // 经验条与升级门槛
+  fireCd: 0,                       // 距离下一炮还攒够毫秒没
+  flash: 0,                        // 炮口火光剩余时间
+  shake: 0,                        // 屏幕震动强度
+};
 
-// 四个朝向对应的"每走一步偏移几格"：[dx, dy]。
-// 有了这张表，前进、算 AI 候选格、画五官共用一套，不用写四套 if。
-const DIRV = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0] };
-const BACK = { U: "D", D: "U", L: "R", R: "L" };   // 反方向，用来识别“想掉头”的请求
-const LTURN = { U: "L", L: "D", D: "R", R: "U" };  // 相对当前朝向“左转”得到的新朝向
-const RTURN = { U: "R", R: "D", D: "L", L: "U" };  // 相对当前朝向“右转”得到的新朝向
+let wave = 1;            // 第几波
+let waveTimer = 0;       // 本波已经打了多少毫秒
+let spawnCd = 0;         // 距离下一只僵尸出场的毫秒
+let kills = 0;           // 累计击杀
+let score = 0;           // 得分
 
-const rnd = (n) => Math.floor(Math.random() * n);    // 0 ~ n-1 的随机整数
+const zombies = [];      // 场上僵尸
+const bullets = [];      // 场上子弹
+const parts = [];        // 死亡碎片粒子
+const floaters = [];     // 飘字（伤害数字 / +经验）
+const cards = [];        // 升级三选一卡片
 
-// 苹果从"一个坐标"改成"一份清单"：电脑蛇死的时候要把吃掉的苹果撒回躯体上，
-// 盘子上就可能同时躺着好几颗，所以必须用数组才装得下。
-const apples = [];             // 每个元素是 { x, y }，苹果所在格子的左上角像素坐标
+// 状态机：ready 待开始 / playing 进行中 / levelup 升级选卡暂停 / over 结束
+let state = "ready";
+let overMsg = "";
 
-// 金苹果：单独一个（不是普通苹果清单里的），场上同时最多一颗。
-let golden = null;             // 当前那颗金苹果 { x, y }；null = 暂时没有
-let goldenNextAt = 0;          // 游戏时间到多少毫秒该再冒一颗金苹果
-
-// 是不是触屏设备（手机/平板）。下面"晕过去"那行提示要拿它决定写"按空格"还是"点一下"，
-// 所以必须放在文件开头就算好 —— 谁在前面用，谁就得先声明。
 const isTouch = window.matchMedia("(pointer: coarse)").matches;
 
-// 最高分：Java 版关掉程序就忘了，网页版存进 localStorage，下次打开还在。
-// （浏览器不允许网页随便往你电脑写文件，但给了一小块"便签纸"存这种小数据。）
-const HS_KEY = "snake-high-score";
+// 最高分存 localStorage，下次打开还在
+const HS_KEY = "zombie-high-score";
 let highScore = 0;
-try {
-  highScore = Number(localStorage.getItem(HS_KEY)) || 0;
-} catch (e) {
-  highScore = 0; // 极少数隐私模式下读写会报错，忽略即可，不影响玩
+try { highScore = Number(localStorage.getItem(HS_KEY)) || 0; }
+catch (e) { highScore = 0; }
+
+// 时间轴
+let rafId = null, lastFrame = 0, gameMs = 0, nowSec = 0;
+let fpsAcc = 0, fpsCount = 0, fpsShown = 0;
+
+const rnd = (n) => Math.floor(Math.random() * n);
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+
+// ============ 五、波次与出场 ============
+
+/** 当前波每只僵尸的血量倍率：越往后越硬 */
+function waveHp()   { return 1 + (wave - 1) * 0.32; }
+/** 出场间隔（毫秒）：波数越高催得越紧 */
+function spawnGap() { return Math.max(260, 1050 - wave * 68); }
+
+/** 按当前波数决定该出哪种怪 */
+function pickType() {
+  const roll = Math.random();
+  if (wave >= 3 && roll < 0.16) return "runner";
+  if (wave >= 4 && roll < 0.28) return "tank";
+  if (roll < 0.7) return "walker";
+  return "runner";
 }
 
-// ---- 循环状态 ----
-let rafId = null;      // requestAnimationFrame 的编号，null = 循环没在跑
-let lastFrame = 0;     // 上一帧的时间戳
-let acc = 0;           // 玩家这一步已经攒了多少毫秒（0 ~ DELAY）
-let eAcc = 0;          // 电脑蛇自己那一步攒的毫秒（0 ~ E_DELAY）：它慢一拍，单独计时
-let nowMs = 0;         // 本帧的绝对时间，给舌头那种"按秒呼吸"的小动画用
-let gameMs = 0;        // 本局已经玩了多久。复活倒计时用它而不是 nowMs：
-                       // 切走标签页时循环会停、gameMs 也跟着停，
-                       // 不会出现"离开五分钟、回来电脑蛇早就复活了"
+/** 放一只某类型的僵尸到顶部随机列 */
+function spawnZombie(type) {
+  const t = ZTYPE[type];
+  const x = rand(30, W - 30);
+  zombies.push({
+    x: x, y: -t.r,
+    r: t.r, type: type,
+    hp: t.hp * waveHp(), maxHp: t.hp * waveHp(),
+    spd: rand(38, 52) * t.spd,   // 基础下压速度 * 类型倍率
+    wob: rand(0, 6.28),          // 走路左右摇摆的相位，纯表演
+    flash: 0,
+  });
+  // Boss 血厚、居中偏一点出场，顺便震一下屏
+  if (type === "boss") { player.shake = Math.max(player.shake, 8); }
+}
 
-// ============ 五、开局与投放苹果 ============
-
-/** 摆一条蛇：头在 (headCol, row)，身体沿"朝向的反方向"往后排 */
-function placeSnake(s, headCol, row) {
-  const back = s.dir === "R" ? -1 : 1;   // 朝右身体排在左边，朝左身体排在右边
-  for (let i = 0; i < s.parts; i++) {
-    s.x[i] = (headCol + back * i) * UNIT_SIZE;
-    s.y[i] = row * UNIT_SIZE;
+/** 每波到点就推进波数；逢 5 的倍数加一只 Boss */
+function tickWave(dt) {
+  waveTimer += dt;
+  if (waveTimer >= 16000) {   // 每 16 秒进下一波
+    waveTimer = 0;
+    wave++;
+    if (wave % 5 === 0) spawnZombie("boss");
+    floatUp(W / 2, 96, "第 " + wave + " 波", [255, 226, 128], 22);
   }
 }
 
-/** 把一条蛇重置成开局状态 */
-function resetSnake(s, dir, headCol, row) {
-  s.dir = dir;
-  s.parts = START_PARTS;
-  s.score = 0;
-  s.alive = true;
-  s.respawnAt = 0;
-  s.invUntil = 0;
-  s.buf = [];
-  s.queue = [];
-  s.arcTries = 0;
-  placeSnake(s, headCol, row);
-  syncPrev(s);   // 开局时"上一步"和"这一步"重合，蛇不会自己飘
+/** 攒够出场间隔就放一只 */
+function tickSpawn(dt) {
+  spawnCd -= dt;
+  if (spawnCd <= 0) {
+    spawnCd = spawnGap();
+    spawnZombie(pickType());
+  }
 }
 
-/** 把一局的所有初始状态摆好 */
-function newGame() {
-  apples.length = 0;
-  gameMs = 0;
-  golden = null;                 // 金苹果：每局重置
-  goldenNextAt = GOLDEN_FIRST;
+// ============ 六、炮台：索敌、开火 ============
 
-  // 玩家：左上角，头朝右
-  resetSnake(P, "R", 5, 5);
-  // 电脑：右下角，头朝左 —— 开局离你最远，不会一上来就贴脸
-  resetSnake(E, "L", GAME_UNITS - START_PARTS, GAME_UNITS - 6);
-
-  spawnApple();
+/** 找到离炮台最近的一只僵尸作为目标；没有返回 null */
+function nearestZombie() {
+  let best = null, bd = Infinity;
+  for (const z of zombies) {
+    const d = dist(player.x, CANNON_Y, z.x, z.y);
+    if (d < bd) { bd = d; best = z; }
+  }
+  return best;
 }
 
-/** 这个格子上有没有活蛇的身体（死蛇不算，它已经不存在了） */
-function cellBusy(x, y) {
-  for (const s of [P, E]) {
-    if (!s.alive) continue;
-    for (let i = 0; i < s.parts; i++) {
-      if (s.x[i] === x && s.y[i] === y) return true;
+/** 炮管朝目标转过去，并开火 */
+function tickCannon(dt) {
+  const tgt = nearestZombie();
+  // 有怪就瞄向它，没怪就抬回正上方
+  const aimTo = tgt ? Math.atan2(tgt.y - CANNON_Y, tgt.x - player.x) : -Math.PI / 2;
+  // 平滑转向：朝目标角度一点点转，别"咔"一下瞬移
+  let diff = aimTo - player.aim;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  player.aim += diff * Math.min(1, dt / 60);
+
+  player.fireCd -= dt;
+  if (player.fireCd <= 0 && tgt) {
+    fireVolley();
+    player.fireCd = player.fireInterval;
+  }
+}
+
+/** 按当前 shots/pierce 打出一轮弹幕 */
+function fireVolley() {
+  const n = player.shots;
+  const spread = n === 1 ? 0 : 0.16 * (n - 1);   // 多弹时扇形张开一点
+  const mx = player.x + Math.cos(player.aim) * (player.r + 8);
+  const my = CANNON_Y + Math.sin(player.aim) * (player.r + 8);
+  for (let i = 0; i < n; i++) {
+    const a = player.aim + (n === 1 ? 0 : -spread / 2 + spread * (i / (n - 1)));
+    bullets.push({
+      x: mx, y: my,
+      vx: Math.cos(a) * player.bulletSpeed,
+      vy: Math.sin(a) * player.bulletSpeed,
+      dmg: player.dmg, pierce: player.pierce, hit: 0, r: 4,
+    });
+  }
+  player.flash = 90;   // 炮口亮一下
+}
+
+// ============ 七、子弹与僵尸的移动、碰撞 ============
+
+function tickBullets(dt) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt / 1000;
+    b.y += b.vy * dt / 1000;
+    // 飞出屏幕就回收
+    if (b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) {
+      bullets.splice(i, 1); continue;
     }
-  }
-  return false;
-}
-
-/** 苹果清单里 (x,y) 这一格是第几颗；没有就返回 -1 */
-function appleIndexAt(x, y) {
-  for (let i = 0; i < apples.length; i++) {
-    if (apples[i].x === x && apples[i].y === y) return i;
-  }
-  return -1;
-}
-
-/** 把落在最外圈（贴墙一圈）的格子往场内挪一格，避免苹果紧贴墙根 */
-function pullInward(x, y) {
-  let nx = x, ny = y;
-  if (y === 0) ny = UNIT_SIZE;                                          // 顶行往下挪
-  else if (y === PANEL_SIZE - UNIT_SIZE) ny = PANEL_SIZE - 2 * UNIT_SIZE; // 底行往上挪
-  if (x === 0) nx = UNIT_SIZE;                                          // 最左列往右挪
-  else if (x === PANEL_SIZE - UNIT_SIZE) nx = PANEL_SIZE - 2 * UNIT_SIZE; // 最右列往左挪
-  return { x: nx, y: ny };
-}
-
-/** 在棋盘上随机扔一颗苹果：只往场内那一圈投，避开贴着墙的格子 */
-function spawnApple() {
-  if (apples.length >= MAX_APPLES) return;   // 堆满了就不再补，不然能刷满一盘
-  for (let tries = 0; tries < 400; tries++) {
-    const x = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;   // 1~23 列，不贴墙
-    const y = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;   // 1~23 行，不贴墙
-    if (!cellBusy(x, y) && appleIndexAt(x, y) < 0 && !goldenAt(x, y)) {
-      apples.push({ x: x, y: y });
-      return;
-    }
-  }
-}
-
-/** 这个格子是不是正好摆着金苹果 */
-function goldenAt(x, y) { return !!golden && golden.x === x && golden.y === y; }
-
-/** 蛇是否处于无敌：吃了金苹果、且还没到期 */
-function isInv(s) { return s.alive && gameMs < s.invUntil; }
-
-/** 找一个空位（不贴墙、不在活蛇身上、不压已有苹果/金苹果）；找不到返回 null */
-function findFreeCell() {
-  for (let tries = 0; tries < 400; tries++) {
-    const x = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;
-    const y = (1 + rnd(GAME_UNITS - 2)) * UNIT_SIZE;
-    if (cellBusy(x, y)) continue;
-    if (appleIndexAt(x, y) >= 0) continue;
-    if (goldenAt(x, y)) continue;
-    return { x: x, y: y };
-  }
-  return null;
-}
-
-/** 该冒金苹果了就冒一颗：场上同时最多一颗，摆上后停表直到被吃 */
-function maybeSpawnGolden() {
-  if (golden !== null || gameMs < goldenNextAt) return;
-  const cell = findFreeCell();
-  if (cell) { golden = cell; goldenNextAt = Infinity; }
-  else goldenNextAt = gameMs + 1000;   // 塞不下，一秒后再试
-}
-
-/** 谁把头停到金苹果上谁就吃到：立刻无敌 INVINCIBLE_MS，并排下一颗的出场时间 */
-function eatGolden(s) {
-  if (!golden || !s.alive) return;
-  if (golden.x === s.x[0] && golden.y === s.y[0]) {
-    golden = null;
-    goldenNextAt = gameMs + GOLDEN_MS;
-    s.invUntil = gameMs + INVINCIBLE_MS;
-  }
-}
-
-// ============ 六、游戏循环：逻辑走格子，画面按秒滑 ============
-
-/** 把"当前格坐标"复制一份当作"上一步的格坐标"，插值才有起点。
-    注意多抄一格（i <= parts）：advance() 会往那个空位里写东西。 */
-function syncPrev(s) {
-  for (let i = 0; i <= s.parts; i++) {
-    s.px[i] = s.x[i];
-    s.py[i] = s.y[i];
-  }
-}
-
-/**
- * 玩家走一格：记起点 → 挪 → 判撞（撞墙 / 撞自己 / 撞电脑身子）→ 认领苹果。
- */
-function playerStep() {
-  commitDir();            // 先把攒下的转向意图落实成这一步的朝向（含掉头两步走）
-  syncPrev(P);
-  advance(P);
-  checkHeadToHead();      // 头对头排在前面判：撞个正着算玩家赢（只死电脑蛇）
-  checkCollision(P);
-  eatApples(P);
-  eatGolden(P);
-  if (apples.length === 0) spawnApple();
-  maybeSpawnGolden();
-}
-
-/**
- * 每走一步之前，把攒下的转向意图结算成蛇头朝向。
- * 关键：一步只落地一个方向，且落地时对着当下真实朝向现判，从根上杜绝了
- * “连改两次方向却只前进一格 = 瞬间 180 度掉头一头撞脖子”的 bug。
- * 普通 90 度转向验完落点再生效；180 度回头则拆成“同向两拐”分两步走完。
- * 任何一步落点必撞都不硬走：本步直行等位、下一步重试，绝不替玩家自杀。
- */
-function commitDir() {
-  // 回转第二步：落子前再验一次（直行等位的这几步里局面可能变了）。
-  // 安全才落；不安全就本步直行、下一步重试，连续几次都不安全才放弃这段回转。
-  if (P.queue.length > 0) {
-    if (!wouldDie(P.queue[0])) { P.dir = P.queue.shift(); P.arcTries = 0; return; }
-    if (++P.arcTries >= 5) { P.queue.shift(); P.arcTries = 0; }
-    return;                                         // 先直行等一等
-  }
-
-  if (P.buf.length === 0) return;                               // 没有待处理输入
-  let req = P.buf.shift();                                      // 取队首（最早排进来的意图）
-  while (req && req.to === P.dir && P.buf.length > 0) req = P.buf.shift();  // 跳过陈旧同向项
-  const to = req.to, arc = req.arc;
-  if (to === P.dir) return;                             // 都是当前方向，空耗一步
-
-  if (to !== BACK[P.dir]) {
-    // 普通 90 度弯：也要验落点。会撞进身子的弯（比如绕回刚拐出的手肘）不硬执行，
-    // 放回队首、本步直行，下一步再试；试几轮还不行就丢弃 —— 绝不替玩家自杀。
-    if (wouldDie(to)) {
-      req.tries = (req.tries || 0) + 1;
-      if (req.tries < 5) P.buf.unshift(req);
-      return;
-    }
-    P.dir = to; return;                                 // 普通的 90 度拐弯
-  }
-
-  // 想 180 度回头：拆成“先往一侧迈一步（这步合法）、下一步再补上反向”。
-  // pref：玩家/摇杆点名的侧向（摇杆 arc 或键盘 held），没点名就是 null。
-  const pref = (arc && arc !== P.dir && arc !== to) ? arc : arcFromHeld();
-  // 挑侧向不能只验第一步，第二步（回头落点）也得验，
-  // 否则身子一拐弯，回头第二步就撞进自己身体里 —— 横着走时最容易撞上。
-  const side = chooseArc(to, pref);
-  // 两侧两步内都必撞（被身子/墙/电脑堵死）：不硬回头。
-  // 保留回头意图，本步直行，等尾巴挪开再试；试几轮还不行就放弃。
-  if (arcDies(side, to)) {
-    req.tries = (req.tries || 0) + 1;
-    if (req.tries < 5) P.buf.unshift(req);
-    return;
-  }
-  P.dir = side;
-  P.queue.push(to);
-}
-
-/** 玩家按 dir 走一格，落点对当前局面来说是不是致命（撞墙/撞身子/撞电脑） */
-function wouldDie(dir) {
-  const d = DIRV[dir];
-  return cellIsDeadly(P.x[0] + d[0] * UNIT_SIZE, P.y[0] + d[1] * UNIT_SIZE, P);
-}
-
-/** 走“先 f 一步、再往 to 一步”这段回转，中途会不会撞（撞墙或撞身子）。
-    用当前局面近似判断（电脑蛇慢一拍，这里当它暂时不动）。 */
-function arcDies(f, to) {
-  const x1 = P.x[0] + DIRV[f][0] * UNIT_SIZE, y1 = P.y[0] + DIRV[f][1] * UNIT_SIZE;
-  if (cellIsDeadly(x1, y1, P)) return true;                    // 第一步落点就撞
-  const x2 = x1 + DIRV[to][0] * UNIT_SIZE, y2 = y1 + DIRV[to][1] * UNIT_SIZE;
-  return cellIsDeadly(x2, y2, P);                              // 第二步（回头）落点撞
-}
-
-/** 给掉头挑“先迈”的侧向：优先听玩家点名的，但前提是它两步都不撞；
-    点名的那侧会撞死就自动换成能活的一侧，两侧都必撞才退回答应玩家。 */
-function chooseArc(to, pref) {
-  const l = LTURN[P.dir], r = RTURN[P.dir];
-  const lOk = !arcDies(l, to), rOk = !arcDies(r, to);
-  if (pref === l && lOk) return l;                    // 点名左侧且左侧安全
-  if (pref === r && rOk) return r;                    // 点名右侧且右侧安全
-  if (lOk && rOk) return pref === r ? r : l;          // 两侧都能活：没点名默认左转
-  if (lOk) return l;                                  // 只有左侧能活
-  if (rOk) return r;                                  // 只有右侧能活
-  return pref === r ? r : l;                          // 两侧回头都必撞（被身子堵死）：随玩家
-}
-
-/**
- * 电脑蛇走一格。它比玩家慢一拍，所以不再跟玩家同步，而是由自己的计时器
- * 单独触发（见 loop 里的 eAcc）。复活倒计时也挂在这儿，照常往前走。
- */
-function enemyStep() {
-  tryRespawn();
-  if (!E.alive) return;   // 还没到复活点，这一步没它的事
-  syncPrev(E);
-  aiThink();              // 电脑想一想往哪走（偶尔走神）
-  advance(E);
-  checkHeadToHead();
-  checkCollision(E);
-  eatApples(E);
-  eatGolden(E);
-  if (apples.length === 0) spawnApple();
-}
-
-/** 启动画面循环 */
-function startLoop() {
-  if (rafId !== null) return; // 已经在跑了，别重复启动
-  lastFrame = performance.now();
-  rafId = requestAnimationFrame(loop);
-}
-
-function stopLoop() {
-  if (rafId !== null) {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-  }
-}
-
-/** 重开一局 */
-function restart() {
-  newGame();
-  acc = 0;
-  eAcc = 0;
-  startLoop();
-}
-
-// ---- 实时读数：把"到底是不是逐帧在动"变成看得见的数字 ----
-// 最有用的不是帧率本身，而是第二行："每一格切成几帧画"。
-// 这个数 = 1 就是旧的顿挫感；接近 8 才说明插值真的在起作用。
-const fpsEl = document.getElementById("fps");
-let fpsFrames = 0;
-let fpsSince = performance.now();   // 不这么初始化的话，第一行读数会算出一个假数字
-
-function updateFps(now) {
-  fpsFrames++;
-  if (now - fpsSince < 500) return;      // 每半秒才更新一次，不拖慢游戏
-  const fps = fpsFrames * 1000 / (now - fpsSince);
-  fpsFrames = 0;
-  fpsSince = now;
-  fpsEl.textContent =
-    "屏幕刷新 " + fps.toFixed(0) + " 帧/秒 · 每一格切成 "
-    + (fps * DELAY / 1000).toFixed(1) + " 帧画（= 1 就是在跳格子）";
-}
-
-/**
- * 每一屏刷新跑一次（约 60 次/秒）。
- * 关键区别：它不是"每 130 毫秒才动一下"，而是
- * "每 130 毫秒才走一格，但每一帧都把蛇画在这一格的途中"。
- */
-function loop(now) {
-  nowMs = now;
-  updateFps(now);
-
-  // 这一帧距离上一帧过了多久。切后台再回来会一次性报一个巨大的数，
-  // 不夹住的话蛇会瞬移十几格，所以封顶 100 毫秒。
-  const dt = Math.min(now - lastFrame, 100);
-  lastFrame = now;
-
-  if (P.alive) {
-    gameMs += dt;          // 本局计时：电脑蛇的复活倒计时看它
-    acc  += dt;
-    eAcc += dt;            // 电脑蛇独立计时：攒够 E_DELAY 才走一格，于是比你慢
-    // 各自攒够自己的步长就走一格；掉帧时 while 会自动补上
-    while (acc >= DELAY && P.alive) {
-      acc -= DELAY;
-      playerStep();
-    }
-    while (eAcc >= E_DELAY && P.alive) {
-      eAcc -= E_DELAY;
-      enemyStep();
-    }
-  } else {
-    // 你已经晕了：这一局结束，不再走格子，只让最后那一步滑到底再定格
-    acc  = Math.min(acc + dt, DELAY);
-    eAcc = Math.min(eAcc + dt, E_DELAY);
-  }
-
-  draw();
-
-  // 游戏结束后，等两条蛇最后一步都滑完就彻底停掉循环，不空转费电
-  if (P.alive || acc < DELAY || eAcc < E_DELAY) {
-    rafId = requestAnimationFrame(loop);
-  } else {
-    rafId = null;
-  }
-}
-
-/** 核心：让一条蛇往前挪一格（这段逻辑和 Java 版逐行对应）*/
-function advance(s) {
-  // 【第 1 步】身体依次前移
-  for (let i = s.parts; i > 0; i--) {
-    s.x[i] = s.x[i - 1];
-    s.y[i] = s.y[i - 1];
-  }
-
-  // 【第 2 步】单独算蛇头的新位置（拿上面那张方向向量表，不写 switch）
-  const d = DIRV[s.dir];
-  s.x[0] += d[0] * UNIT_SIZE;
-  s.y[0] += d[1] * UNIT_SIZE;
-}
-
-/** 撞墙 / 撞自己 / 撞对方。判定只看离散的格子坐标，绝不用插值后的画面坐标。
-    无敌（吃了金苹果）时：撞墙照样死，撞自己/撞对方都不怕，还能把对方撞死。 */
-function checkCollision(s) {
-  const hx = s.x[0], hy = s.y[0];
-
-  // 情况 A：撞墙 —— 无敌也救不了，照死
-  if (hx < 0 || hx >= PANEL_SIZE || hy < 0 || hy >= PANEL_SIZE) { kill(s); return; }
-
-  const inv = isInv(s);
-
-  // 情况 B：撞自己 —— 只有不无敌才会死
-  if (!inv) {
-    for (let i = 1; i < s.parts; i++) {
-      if (s.x[i] === hx && s.y[i] === hy) { kill(s); return; }
-    }
-  }
-
-  // 情况 C：撞进对方身体。两条蛇互相当墙；谁能撞死谁，看谁无敌
-  const other = s === P ? E : P;
-  if (other.alive) {
-    for (let i = 0; i < other.parts; i++) {
-      if (other.x[i] === hx && other.y[i] === hy) {
-        if (inv && !isInv(other)) kill(other);   // 我无敌、对方不无敌：撞死对方，我没事
-        else if (!inv) kill(s);                  // 我不无敌：撞上就是死（对方无敌时更是）
-        // 双方都无敌：互相穿过去，都不死
-        return;
+    // 撞僵尸
+    for (let j = zombies.length - 1; j >= 0; j--) {
+      const z = zombies[j];
+      if (dist(b.x, b.y, z.x, z.y) < z.r + b.r) {
+        hitZombie(z, j, b.dmg);
+        b.hit++;
+        if (b.hit > b.pierce) { bullets.splice(i, 1); }
+        break;
       }
     }
   }
 }
 
-/** 头对头撞进同一格（含无敌）：谁无敌谁活、另一个死；
-    都不无敌时维持“对撞算玩家赢”（只死电脑蛇）；都无敌则互相穿过、都不死。 */
-function checkHeadToHead() {
-  if (!P.alive || !E.alive) return;
-  if (P.x[0] !== E.x[0] || P.y[0] !== E.y[0]) return;
-  const pInv = isInv(P), eInv = isInv(E);
-  if (pInv && !eInv) kill(E);
-  else if (eInv && !pInv) kill(P);
-  else if (!pInv && !eInv) kill(E);   // 都不无敌：对撞算玩家赢
-  // 都无敌：都不死
-}
-
-/** 让一条蛇晕过去。已经晕了的不重复处理，免得苹果撒两遍、最高分存两遍 */
-function kill(s) {
-  if (!s.alive) return;
-  s.alive = false;
-  s.invUntil = 0;   // 死了无敌也就没了
-
-  if (s === E) {
-    // 电脑蛇：把吃掉的苹果撒回躯体上，并排一个复活时间点
-    dropApplesOnBody(E);
-    E.respawnAt = gameMs + RESPAWN_MS;
-  } else if (P.score > highScore) {
-    // 玩家：这一局结束，刷新最高分
-    highScore = P.score;
-    try { localStorage.setItem(HS_KEY, String(highScore)); } catch (e) { /* 存不进去就算了 */ }
-  }
-  // 注意：这里**不能**停掉循环。还得靠它把"最后一步滑到墙边"和淡入的黑纱画完，
-  // loop() 自己会在滑完之后停下来。
-}
-
-/** 电脑蛇晕了：把它吃掉的每一颗苹果，随机还回它躯体占过的格子上 */
-function dropApplesOnBody(s) {
-  const cells = [];
-  for (let i = 0; i < s.parts; i++) cells.push({ x: s.x[i], y: s.y[i] });
-
-  // 洗牌（Fisher-Yates）：从躯体里随机挑格子，而不是固定从蛇头那头往下拿
-  for (let i = cells.length - 1; i > 0; i--) {
-    const j = rnd(i + 1);
-    const tmp = cells[i]; cells[i] = cells[j]; cells[j] = tmp;
-  }
-
-  let n = s.score;                        // 吃掉几颗就撒几颗
-  for (const c of cells) {
-    if (n <= 0 || apples.length >= MAX_APPLES) break;
-    // 撞墙死的时候蛇头那一节是在棋盘外（x 可能是 500 或 -20），
-    // 不排掉的话苹果会被撒到屏幕看不见的位置，永远吃不到。
-    if (c.x < 0 || c.x >= PANEL_SIZE || c.y < 0 || c.y >= PANEL_SIZE) continue;
-    // 撞墙死时蛇身基本贴着墙，苹果会堆在墙根、你一去吃就容易撞墙。
-    // 落在最外圈的就先往场内挪一格再放。
-    const p = pullInward(c.x, c.y);
-    if (cellBusy(p.x, p.y)) continue;             // 落在活蛇身上就换下一格
-    if (appleIndexAt(p.x, p.y) >= 0) continue;    // 同一格不放两颗
-    apples.push(p);
-    n--;
-  }
-}
-
-/** 蛇头停在有苹果的格子上就吃掉、变长一节（现在两条蛇分开走，所以一次喂一条）*/
-function eatApples(s) {
-  if (!s.alive) return;
-  const ai = appleIndexAt(s.x[0], s.y[0]);
-  if (ai < 0) return;
-  apples.splice(ai, 1);
-  s.parts++;
-  // 新长出来的那一节，"上一步位"就当作和"这一步位"相同：
-  // 不填这句，它会从数组里残留的旧坐标"飞"过来，看着像抽风。
-  // （物理上也是对的：蛇长大时，尾巴那一节是站在原地不动的。）
-  s.px[s.parts - 1] = s.x[s.parts - 1];
-  s.py[s.parts - 1] = s.y[s.parts - 1];
-  s.score++;
-}
-
-/** 到点就把电脑蛇放回棋盘 */
-function tryRespawn() {
-  if (E.alive || gameMs < E.respawnAt) return;
-  if (!respawnEnemy()) E.respawnAt = gameMs + 1000;   // 塞不下，一秒后再试
-}
-
-/** 在棋盘上找一个能放下整条蛇的空位。找到就复活并返回 true */
-function respawnEnemy() {
-  E.dir = "R";
-  for (let tries = 0; tries < 80; tries++) {
-    const row = rnd(GAME_UNITS);
-    // 头所在的列至少要从 START_PARTS-1 起，否则身体会排到棋盘外面
-    const col = (START_PARTS - 1) + rnd(GAME_UNITS - (START_PARTS - 1));
-    let ok = true;
-    for (let i = 0; i < START_PARTS; i++) {
-      const x = (col - i) * UNIT_SIZE, y = row * UNIT_SIZE;
-      if (cellBusy(x, y) || appleIndexAt(x, y) >= 0) { ok = false; break; }
-    }
-    // 不能贴着脸复活：那样你根本来不及反应，白白撞死在它身上。
-    // 蛇头至少离玩家蛇头三个格子远。
-    if (ok && P.alive) {
-      const gap = Math.abs(col * UNIT_SIZE - P.x[0]) + Math.abs(row * UNIT_SIZE - P.y[0]);
-      if (gap < 3 * UNIT_SIZE) ok = false;
-    }
-    if (!ok) continue;
-    E.parts = START_PARTS;
-    E.score = 0;
-    E.alive = true;
-    placeSnake(E, col, row);
-    syncPrev(E);
-    return true;
-  }
-  return false;
-}
-
-// ---------------- 电脑蛇的脑子：很笨但够用的贪心 ----------------
-
-/** 这个格子对 s 来说是不是一步就死：出界、撞自己、撞对方 */
-function cellIsDeadly(x, y, s) {
-  if (x < 0 || x >= PANEL_SIZE || y < 0 || y >= PANEL_SIZE) return true;
-  for (let i = 1; i < s.parts; i++) {
-    if (s.x[i] === x && s.y[i] === y) return true;
-  }
-  const other = s === P ? E : P;
-  if (other.alive) {
-    for (let i = 0; i < other.parts; i++) {
-      if (other.x[i] === x && other.y[i] === y) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * 电脑蛇每一步想一次：哪颗苹果离我最近，就往能缩短距离的方向走；
- * 但先排掉"一步就死"的方向。如果四个方向全都会死，就挑离苹果最近的那个
- * —— 反正要死，而且它死在哪里，哪里就会下苹果雨，那正是你要的东西。
- */
-function aiThink() {
-  if (!E.alive || (apples.length === 0 && !golden)) return;   // 没吃食才懒得动
-
-  // 走神：有一定概率干脆不看苹果，随便晃。这样它就不会像导航一样死咬着
-  // 最近的苹果追你，看着更像一条"有点笨"的蛇，你更容易抢先。
-  if (Math.random() < AI_DITZY) {
-    const free = [];
-    for (const k in DIRV) {
-      if (k === BACK[E.dir]) continue;           // 照样禁止 180 度掉头
-      const nx = E.x[0] + DIRV[k][0] * UNIT_SIZE;
-      const ny = E.y[0] + DIRV[k][1] * UNIT_SIZE;
-      if (!cellIsDeadly(nx, ny, E)) free.push(k);
-    }
-    // 能安全晃的方向里随机挑一个；全都致命就保持原方向，别自己送头
-    if (free.length > 0) E.dir = free[rnd(free.length)];
-    return;
-  }
-
-  // 1. 选目标：有金苹果就优先冲金苹果，否则找离蛇头最近的普通苹果（曼哈顿距离）
-  let target = null, targetD = Infinity;
-  if (golden) {
-    target = golden;
-    targetD = Math.abs(golden.x - E.x[0]) + Math.abs(golden.y - E.y[0]);
-  } else {
-    for (const a of apples) {
-      const d = Math.abs(a.x - E.x[0]) + Math.abs(a.y - E.y[0]);
-      if (d < targetD) { targetD = d; target = a; }
-    }
-  }
-  if (!target) return;
-
-  // 2. 四个方向里，先排掉 180 度掉头
-  const cands = [];
-  for (const k in DIRV) {
-    if (k !== BACK[E.dir]) cands.push(k);
-  }
-
-  // 3. 在候选里选"离苹果最近、且不会一步就死"的那个
-  let safest = null,  safestRank  = Infinity;   // 能活的方向里最好的
-  let fastest = null, fastestRank = Infinity;   // 不管死活，最接近苹果的
-  for (const k of cands) {
-    const nx = E.x[0] + DIRV[k][0] * UNIT_SIZE;
-    const ny = E.y[0] + DIRV[k][1] * UNIT_SIZE;
-    const rank = Math.abs(target.x - nx) + Math.abs(target.y - ny);
-    if (rank < fastestRank) { fastestRank = rank; fastest = k; }
-    if (!cellIsDeadly(nx, ny, E) && rank < safestRank) { safestRank = rank; safest = k; }
-  }
-
-  if (safest !== null) E.dir = safest;
-  else if (fastest !== null) E.dir = fastest;
-}
-
-// ============ 七、把当前状态画到屏幕上 ============
-
-/** 小工具：画实心椭圆。参数含义跟 Java 的 fillOval 完全一致（x,y 是左上角）*/
-function fillOval(x, y, w, h) {
-  g.beginPath();
-  g.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
-  g.fill();
-}
-
-/** 小工具：画实心圆角矩形，对应 Java 的 fillRoundRect。
-    Canvas 其实有现成的 roundRect()，但老浏览器没有，所以自己用 arcTo 兜一圈更保险。*/
-function fillRoundRect(x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2); // 圆角不能比半边还大，否则画不出来
-  g.beginPath();
-  g.moveTo(x + rr, y);
-  g.arcTo(x + w, y,     x + w, y + h, rr);
-  g.arcTo(x + w, y + h, x,     y + h, rr);
-  g.arcTo(x,     y + h, x,     y,     rr);
-  g.arcTo(x,     y,     x + w, y,     rr);
-  g.closePath();
-  g.fill();
-}
-
-/** 一帧画面的总调度：从最底层往上涂 */
-function draw() {
-  // 本帧的"这一步走了几成"：0 = 刚起步，1 = 已经到位。
-  // 两条蛇各走各的节拍，所以插值系数也分开算：玩家按 DELAY，电脑按 E_DELAY。
-  const t  = Math.min(acc  / DELAY,   1);
-  const te = Math.min(eAcc / E_DELAY, 1);
-
-  drawBoard();
-
-  if (!P.alive) {
-    // 死了：先蒙一层半透明的黑纱，蛇和字再画在纱上面。
-    // 透明度跟着 t 从 0 长到满，黑纱是"淡入"而不是"啪一下盖上来"。
-    g.fillStyle = "rgba(0, 0, 0, " + (0.59 * t).toFixed(3) + ")";
-    g.fillRect(0, 0, PANEL_SIZE, PANEL_SIZE);
-  }
-
-  drawApples();
-
-  // 先画电脑、再画玩家：万一两节身体重叠，你的绿蛇压在灰蛇上面，一眼能分清
-  if (E.alive) drawSnake(E, te);
-  drawSnake(P, t);
-
-  if (P.alive) drawScore();
-  else gameOver(t);
-}
-
-// 撞墙时蛇头的格子坐标会落到棋盘外（比如 x = 500），照直画会整节滑出画面“消失”。
-// 允许它往墙里探 6 像素再停住，看着像“撞上去”而不是“穿墙消失”。
-const OVERSHOOT = 6;
-const MIN_POS = -OVERSHOOT;
-const MAX_POS = PANEL_SIZE - UNIT_SIZE + OVERSHOOT;
-
-/** 第 i 节本帧该画在哪：从"上一步的格子"滑到"这一步的格子"，滑到 t 这一成 */
-function segX(s, i, t) {
-  const v = s.px[i] + (s.x[i] - s.px[i]) * t;
-  return Math.max(MIN_POS, Math.min(MAX_POS, v));
-}
-
-function segY(s, i, t) {
-  const v = s.py[i] + (s.y[i] - s.py[i]) * t;
-  return Math.max(MIN_POS, Math.min(MAX_POS, v));
-}
-
-/** 背景：若隐若现的棋盘格 */
-function drawBoard() {
-  for (let row = 0; row < GAME_UNITS; row++) {
-    for (let col = 0; col < GAME_UNITS; col++) {
-      g.fillStyle = rgb(((row + col) % 2 === 0) ? C.bgDark : C.bgLight);
-      g.fillRect(col * UNIT_SIZE, row * UNIT_SIZE, UNIT_SIZE, UNIT_SIZE);
+function tickZombies(dt) {
+  const slow = 1 - player.slowPct / 100;   // 减速光环全局系数
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    const z = zombies[i];
+    z.y += z.spd * slow * dt / 1000;
+    z.wob += dt / 1000 * 6;
+    if (z.flash > 0) z.flash -= dt;
+    // 越过城墙线：啃墙一口，自己化作血浆消失
+    if (z.y + z.r >= WALL_Y) {
+      const bite = z.type === "boss" ? 26 : z.type === "tank" ? 12 : 7;
+      damageWall(bite);
+      burst(z.x, WALL_Y, [190, 60, 70], 10);
+      zombies.splice(i, 1);
     }
   }
 }
 
-/** 苹果：现在盘子上可能同时躺着好几颗（电脑蛇死后会下苹果雨），所以逐个画 */
-function drawApples() {
-  for (const a of apples) drawOneApple(a.x, a.y);
-  drawGoldenApple();
+/** 对僵尸造成 dmg 伤害；死了就结算分数/经验并爆碎片 */
+function hitZombie(z, index, dmg) {
+  z.hp -= dmg;
+  z.flash = 90;
+  floatUp(z.x, z.y - z.r, "-" + Math.round(dmg), [255, 255, 255], 12);
+  if (z.hp <= 0) killZombie(z, index);
 }
 
-/** 一颗苹果：圆果子 + 亮晶晶的高光 + 头顶一片小叶子 */
-function drawOneApple(x, y) {
-  // 注意 fillOval 是我们自己写的函数，不是 Canvas 上下文的方法，
-  // 所以必须裸调用 fillOval(...)，写成 g.fillOval(...) 会直接抛异常。
-  g.fillStyle = rgb(C.apple);
-  fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
-
-  g.fillStyle = rgb(C.appleShine);
-  fillOval(x + 4, y + 6, 4, 3);
-
-  g.fillStyle = rgb(C.leaf);
-  fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
+function killZombie(z, index) {
+  const t = ZTYPE[z.type];
+  score += t.pts;
+  kills++;
+  burst(z.x, z.y, t.col, z.type === "boss" ? 26 : 12);
+  gainXp(z.type === "boss" ? 8 : 1);
+  if (z.type === "boss") player.shake = Math.max(player.shake, 10);
+  zombies.splice(index, 1);
 }
 
-/** 金苹果：比普通苹果更亮，还带一圈呼吸的光晕，好让你在盘子里一眼锁定它 */
-function drawGoldenApple() {
-  if (!golden) return;
-  const x = golden.x, y = golden.y;
-  const pulse = 0.5 + 0.5 * Math.sin(nowMs / 200);
-  g.save();
-  g.shadowColor = "rgba(255, 210, 80, " + (0.55 + 0.45 * pulse).toFixed(2) + ")";
-  g.shadowBlur = 10 + 8 * pulse;
-  g.fillStyle = rgb(C.gold);
-  fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
-  g.restore();
-  g.fillStyle = rgb(C.goldShine);
-  fillOval(x + 4, y + 6, 4, 3);
-  g.fillStyle = rgb(C.leaf);
-  fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
-}
-
-/** 蛇：一节一节圆滚滚的"扭扭糖"。s = 画哪条蛇，t = 这一步走了几成 */
-function drawSnake(s, t) {
-  // 无敌期间：给整条蛇罩一层会呼吸的金色光晕，一眼看出现在谁都撞不死它
-  const inv = isInv(s);
-  if (inv) {
-    g.save();
-    g.shadowColor = "rgba(255, 210, 80, 0.95)";
-    g.shadowBlur = 10 + 8 * (0.5 + 0.5 * Math.sin(nowMs / 120));
-  }
-
-  // ---- 身体：从尾巴往蛇头画，深浅两色隔节相间（颜色从这条蛇自己的调色板里拿）----
-  for (let i = s.parts - 1; i >= 1; i--) {
-    g.fillStyle = rgb((i % 2 === 0) ? s.pal.bodyMid : s.pal.bodyDark);
-    // 每节向内缩 1 像素，节与节之间留一道缝；尾巴那节多缩几像素，收出小尖
-    const pad = (i === s.parts - 1) ? 5 : 1;
-    fillRoundRect(segX(s, i, t) + pad, segY(s, i, t) + pad,
-                  UNIT_SIZE - pad * 2, UNIT_SIZE - pad * 2, 12);
-  }
-
-  // ---- 蛇头：比身体大一圈 ----
-  const hx = segX(s, 0, t);
-  const hy = segY(s, 0, t);
-  g.fillStyle = rgb(s.pal.head);
-  fillRoundRect(hx - 1, hy - 1, UNIT_SIZE + 2, UNIT_SIZE + 2, 14);
-
-  if (inv) g.restore();   // 关掉光晕，五官画清晰点
-
-  drawFace(s, hx, hy);
-}
-
-/**
- * 蛇头的表情。两个"方向向量"管住四个朝向：
- *   forward(fx, fy) = 脸正前方；side(sx, sy) = 左右分眼，永远和 forward 垂直
- * 换方向只是把向量里的 1 换成 -1，一套公式通吃。
- */
-function drawFace(s, hx, hy) {
-  const alive = s.alive;                 // 这条蛇现在是醒着还是晕了
-  let fx = 0, fy = 0;
-  let sx = 0, sy = 0;
-  switch (s.dir) {
-    case "U": fy = -1; sx = 1; break; // 朝上：两只眼左右排
-    case "D": fy =  1; sx = 1; break;
-    case "L": fx = -1; sy = 1; break; // 朝左：两只眼上下排
-    case "R": fx =  1; sy = 1; break;
-  }
-
-  const cx = hx + UNIT_SIZE / 2; // 蛇头中心，所有五官都拿它当基准
-  const cy = hy + UNIT_SIZE / 2;
-
-  g.lineCap = "round"; // 线条两头修成圆的，不显生硬
-
-  for (let side = -1; side <= 1; side += 2) { // -1 = 左眼，+1 = 右眼
-    const ex = cx + fx * 3 + sx * 4 * side;
-    const ey = cy + fy * 3 + sy * 4 * side;
-
-    if (alive) {
-      g.fillStyle = "#fff";
-      fillOval(ex - 3, ey - 3, 6, 6);
-      g.fillStyle = rgb(C.pupil);            // 瞳孔往前挪 1 像素 = 眼神盯着要去的方向
-      fillOval(ex - 2 + fx, ey - 2 + fy, 4, 4);
-    } else {
-      g.strokeStyle = "#fff";                // 晕过去了：两个 X 当眼睛
-      g.lineWidth = 1.6;
-      g.beginPath();
-      g.moveTo(ex - 3, ey - 3); g.lineTo(ex + 3, ey + 3);
-      g.moveTo(ex + 3, ey - 3); g.lineTo(ex - 3, ey + 3);
-      g.stroke();
-    }
-  }
-
-  if (!alive) return; // 晕过去的时候舌头就收起来，不吐了
-
-  // 小舌头：从嘴边伸出去，末端分个叉。
-  // 有了连续时钟之后，还能让它按秒呼吸式地伸伸缩缩，蛇立马就"活"了。
-  const flick = 0.5 + 0.5 * Math.sin(nowMs / 230); // 在 0 和 1 之间缓慢摆动
-  g.strokeStyle = rgb(s.pal.tongue);     // 舌头颜色也归各自的调色板管
-  g.lineWidth = 2;
-  const mx = cx + fx * 9,  my = cy + fy * 9;              // 舌头根
-  const tip = 10 + 9 * flick;                              // 伸出去多远
-  const tx = cx + fx * tip, ty = cy + fy * tip;            // 舌头尖
-  g.beginPath();
-  g.moveTo(mx, my); g.lineTo(tx, ty);
-  g.moveTo(tx, ty); g.lineTo(tx + fx * 3 + sx * 2, ty + fy * 3 + sy * 2);
-  g.moveTo(tx, ty); g.lineTo(tx + fx * 3 - sx * 2, ty + fy * 3 - sy * 2);
-  g.stroke();
-}
-
-/** 三个角的状态：左下你的得分、右下最高分、左上电脑战况。
-    注意：Canvas 的 fillText 和 Java 的 drawString 一样，y 给的是"文字的基线"而不是顶边，
-    所以这些坐标可以从 Java 版直接抄过来，不用重算。 */
-function drawScore() {
-  g.fillStyle = "#fff";
-  g.font = "bold 16px 'Microsoft YaHei', sans-serif";
-  g.textAlign = "left";
-  g.fillText("得分 " + P.score, UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
-
-  g.textAlign = "right"; // 网页里"靠右对齐"是个现成开关，不用像 Java 那样自己量字宽
-  g.fillText("最高分 " + highScore, PANEL_SIZE - UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
-
-  // 左上角盯电脑。它晕过去的时候必须把倒计时写在明面上，
-  // 否则对手凭空消失，你会以为页面又坏了。
-  g.textAlign = "left";
-  if (E.alive) {
-    g.fillStyle = rgb(E.pal.head);
-    g.fillText("电脑 " + E.score, UNIT_SIZE, UNIT_SIZE * 2 - UNIT_SIZE / 2);
-  } else {
-    const left = Math.max(0, Math.ceil((E.respawnAt - gameMs) / 1000));
-    g.fillStyle = "rgb(150, 158, 166)";
-    g.fillText("电脑 " + left + " 秒后复活", UNIT_SIZE, UNIT_SIZE * 2 - UNIT_SIZE / 2);
-  }
-
-  // 玩家正无敌时，顶部中间显示剩余秒数，免得不知道自己几时“金钟罩”到期
-  if (isInv(P)) {
-    g.textAlign = "center";
-    g.fillStyle = "rgb(255, 214, 90)";
-    g.fillText("金钟护体 " + Math.ceil((P.invUntil - gameMs) / 1000) + " 秒",
-               PANEL_SIZE / 2, UNIT_SIZE * 2 - UNIT_SIZE / 2);
+function damageWall(amount) {
+  player.hp -= amount;
+  player.shake = Math.max(player.shake, 7);
+  floatUp(W / 2, WALL_Y - 12, "-" + amount, [240, 96, 96], 16);
+  if (player.hp <= 0) {
+    player.hp = 0;
+    gameOver();
   }
 }
 
-function gameOver(t) {
-  g.globalAlpha = t;   // 字也跟着淡入，和黑纱同步
-  g.textAlign = "center"; // 居中也是现成开关：x 直接给面板中线就行
-  const mid = PANEL_SIZE / 2;
+// ============ 八、升级选卡 ============
 
-  g.fillStyle = "rgb(255, 180, 110)";
-  g.font = "bold 32px 'Microsoft YaHei', sans-serif";
-  g.fillText("蛇蛇晕过去了", mid, mid - 40);
+// 强化卡池：想加新强化，只在这里多写一条
+const UPGRADES = [
+  { key: "dmg",    title: "火力强化", desc: "单发伤害 +35%",     apply: () => player.dmg *= 1.35 },
+  { key: "rate",   title: "加特林",   desc: "射速 +18%",          apply: () => player.fireInterval = Math.max(70, player.fireInterval * 0.82) },
+  { key: "shot",   title: "多重炮管", desc: "弹幕 +1 发",         apply: () => player.shots += 1 },
+  { key: "spd",    title: "高速弹",   desc: "弹速 +16%",          apply: () => player.bulletSpeed *= 1.16 },
+  { key: "pierce", title: "穿甲弹",   desc: "子弹额外穿透 +1",    apply: () => player.pierce += 1 },
+  { key: "slow",   title: "冰缓立场", desc: "僵尸减速 +8%",       apply: () => player.slowPct = Math.min(70, player.slowPct + 8) },
+  { key: "repair", title: "修补城墙", desc: "城墙回复 30 并加厚", apply: () => { player.maxHp += 12; player.hp = Math.min(player.maxHp, player.hp + 30); } },
+  { key: "hp",     title: "加固城墙", desc: "城墙上限 +30 并回满", apply: () => { player.maxHp += 30; player.hp = Math.min(player.maxHp, player.hp + 30); } },
+];
 
-  g.fillStyle = "#fff";
-  g.font = "18px 'Microsoft YaHei', sans-serif";
-  g.fillText("本局得分 " + P.score, mid, mid + 5);
-
-  g.fillStyle = "rgb(180, 255, 170)";
-  g.fillText(isTouch ? "点一下屏幕再来一次" : "按空格键再来一次", mid, mid + 35);
-  g.globalAlpha = 1;   // 改完记得关回去，否则下一帧所有东西都跟着半透
+function gainXp(n) {
+  player.xp += n;
+  while (player.xp >= player.xpNext) {
+    player.xp -= player.xpNext;
+    player.level++;
+    player.xpNext = Math.round(player.xpNext * 1.4) + 4;
+    openLevelUp();
+  }
 }
 
-// ============ 八、键盘：把"按了哪个键"翻译成"蛇该往哪走" ============
-
-// 转向意图排进一个最多两格的队列 P.buf，每走一格由 commitDir() 消费队首一个。
-// 安全性不变：队列里的意图仍在“真正要走的那一步”对着当下真实朝向现判、
-// 一步只落一个方向，所以“连改两次却只前进一格 = 瞬间 180 度撞脖子”的老 bug 不会再犯。
-// 想 180 度回头也不再是禁忌：交给 commitDir 拆成同向两拐实现。
-// arc：可选，掉头时先迈的侧向（由摇杆给出）；不传则由 chooseArc() 在“两步都不撞”的一侧里自动选。
-function turn(to, arc) {
-  const last = P.buf[P.buf.length - 1];
-  if (last && last.to === to) return;               // 与队尾同向：自动重复的按键/摇杆，忽略
-  if (P.buf.length === 0 && to === P.dir) return;   // 空队列且就是当前方向，忽略
-  // 最新意图是“回头”：队列里还没执行的侧向多半是摇杆横扫“路过”注入的噪声
-  // （从右扫到左，拇指画弧中途扫过上区），清掉它们直接回头。否则“先拐再回”
-  // 会绕成 90°+90° 小螺旋，一头撞进刚拐出的手肘里 —— 下→右→回必死就是这么来的。
-  if (to === BACK[P.dir]) P.buf = [];
-  if (P.buf.length >= 2) P.buf.shift();             // 只留最近两格，太旧的挤掉
-  P.buf.push({ to: to, arc: arc || null });
+/** 抽出 3 张不重复的强化卡，切到选卡界面（逻辑暂停） */
+function openLevelUp() {
+  cards.length = 0;
+  const pool = UPGRADES.slice();
+  for (let i = 0; i < 3 && pool.length; i++) {
+    const u = pool.splice(rnd(pool.length), 1)[0];
+    cards.push(u);
+  }
+  layoutCards();
+  state = "levelup";
 }
 
-const KEY_MAP = {
-  ArrowLeft: "L", KeyA: "L",
-  ArrowRight: "R", KeyD: "R",
-  ArrowUp: "U", KeyW: "U",
-  ArrowDown: "D", KeyS: "D",
-};
-
-// 当前正被按住的方向键（按下的先后顺序）。掉头时拿它来判断“玩家想往哪一侧绕”：
-// 竖着走想回头时多按住 ←/→、横着走想回头时多按住 ↑/↓，就能指定回转的侧向。
-const held = [];
-function markHeld(dir) { if (dir && held.indexOf(dir) < 0) held.push(dir); }
-function clearHeld(dir) { const i = held.indexOf(dir); if (i >= 0) held.splice(i, 1); }
-
-// 掉头时读“额外按住的那个侧向键”当第一步方向；摇杆走 arc 参数不经这儿，互不影响。
-function arcFromHeld() {
-  for (let i = held.length - 1; i >= 0; i--) {
-    const h = held[i];
-    if (h !== P.dir && h !== BACK[P.dir]) return h;   // 既不是当前朝向也不是它的反向 = 垂直侧向
+/** 三张竖排卡片的矩形，方便点击命中检测和绘制共用 */
+function layoutCards() {
+  const cw = 300, ch = 62, gap = 14;
+  const totalH = cards.length * ch + (cards.length - 1) * gap;
+  const y0 = (H - totalH) / 2;
+  for (let i = 0; i < cards.length; i++) {
+    cards[i].rect = { x: (W - cw) / 2, y: y0 + i * (ch + gap), w: cw, h: ch };
   }
-  return null;
 }
 
-document.addEventListener("keydown", (e) => {
-  // 方向键和空格在网页里默认会"滚动页面"，必须按住它，不然一按蛇没动、页面先跑了
-  if (e.code === "Space" || e.code.startsWith("Arrow")) {
-    e.preventDefault();
-  }
+function chooseCard(i) {
+  if (!cards[i]) return;
+  cards[i].apply();
+  floatUp(W / 2, H / 2 - 60, cards[i].title, [122, 196, 255], 20);
+  state = "playing";
+}
 
-  if (!P.alive) {                  // 自己晕了：这局已经结束，只认空格重开
-    if (e.code === "Space") restart();
-    return;
-  }
+// ============ 九、粒子与飘字 ============
 
-  const dir = KEY_MAP[e.code];
-  if (dir) { markHeld(dir); turn(dir); }
+function burst(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, 6.28), s = rand(40, 220);
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(280, 620), max: 620, col, sz: rand(2, 4) });
+  }
+}
+
+function floatUp(x, y, text, col, size) {
+  floaters.push({ x, y, vy: -34, life: 700, max: 700, text, col, size });
+}
+
+function tickEffects(dt) {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.x += p.vx * dt / 1000; p.y += p.vy * dt / 1000;
+    p.vy += 520 * dt / 1000;  // 给碎片一点重力，散落更自然
+    p.life -= dt;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.y += f.vy * dt / 1000;
+    f.life -= dt;
+    if (f.life <= 0) floaters.splice(i, 1);
+  }
+  if (player.flash > 0) player.flash -= dt;
+  if (player.shake > 0) player.shake = Math.max(0, player.shake - dt / 40);
+}
+
+
+// ============ 十、玩家移动（键鼠 + 触摸共用一套 wantX）============
+const keys = { left: false, right: false };
+const MOVE_SPEED = 380;   // 键盘平移速度 px/s
+
+/** 把炮台夹在战场左右留一点边距内 */
+function clampCannon() {
+  player.wantX = clamp(player.wantX, player.r + 4, W - player.r - 4);
+}
+
+/** 键盘：左右键 / AD 持续推动 wantX */
+function tickKeyboard(dt) {
+  if (keys.left)  player.wantX -= MOVE_SPEED * dt / 1000;
+  if (keys.right) player.wantX += MOVE_SPEED * dt / 1000;
+  clampCannon();
+}
+
+/** 指针（鼠标移动 / 触摸拖动）把 wantX 直接设成手指横坐标 */
+function pointerToLogicalX(clientX) {
+  const r = canvas.getBoundingClientRect();
+  return (clientX - r.left) / r.width * W;
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") keys.left = true;
+  if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") keys.right = true;
+  if (e.key === " ") { e.preventDefault(); onPrimary(); }
+  if (state === "levelup") {
+    if (e.key === "1") chooseCard(0);
+    if (e.key === "2") chooseCard(1);
+    if (e.key === "3") chooseCard(2);
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") keys.left = false;
+  if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") keys.right = false;
 });
 
-// 松手要把键从 held 里摘掉，否则“按住指定侧向”会赖着不走。
-document.addEventListener("keyup", (e) => clearHeld(KEY_MAP[e.code]));
+canvas.addEventListener("pointermove", (e) => {
+  if (state !== "playing") return;
+  player.wantX = pointerToLogicalX(e.clientX);
+  clampCannon();
+});
 
-// 切标签页 / 窗口失焦时浏览器不再发 keyup，held 可能卡在按下的状态，这里一律清空兜底。
-window.addEventListener("blur", () => { held.length = 0; });
-
-// ============ 九、触屏：手机上滑一下就算转向 ============
-
-let touchStartX = 0;
-let touchStartY = 0;
-
-canvas.addEventListener("touchstart", (e) => {
+canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  touchStartX = e.changedTouches[0].clientX;
-  touchStartY = e.changedTouches[0].clientY;
-}, { passive: false });
-
-canvas.addEventListener("touchend", (e) => {
-  e.preventDefault();
-  const dx = e.changedTouches[0].clientX - touchStartX;
-  const dy = e.changedTouches[0].clientY - touchStartY;
-
-  if (!P.alive) {           // 晕了的时候，点一下就重开
-    restart();
+  const lx = pointerToLogicalX(e.clientX);
+  const ly = (e.clientY - canvas.getBoundingClientRect().top) / canvas.getBoundingClientRect().height * H;
+  if (state === "levelup") {
+    for (let i = 0; i < cards.length; i++) {
+      const rc = cards[i].rect;
+      if (lx >= rc.x && lx <= rc.x + rc.w && ly >= rc.y && ly <= rc.y + rc.h) { chooseCard(i); return; }
+    }
     return;
   }
+  // 待开始 / 结束时点屏=开始或重开；进行中点屏则炮台跟到手指
+  if (state === "playing") { player.wantX = lx; clampCannon(); }
+  else onPrimary();
+});
 
-  // 滑动距离太短就当"手抖"，不算指令
-  if (Math.abs(dx) < 20 && Math.abs(dy) < 20) return;
+/** 空格 / 点屏 的"主操作"：按当前状态决定是开局、还是重开 */
+function onPrimary() {
+  if (state === "ready") { startGame(); }
+  else if (state === "over") { startGame(); }
+}
 
-  // 哪个方向挪得多就听哪个的：横向大 → 左右，纵向大 → 上下
-  if (Math.abs(dx) > Math.abs(dy)) {
-    turn(dx > 0 ? "R" : "L");
-  } else {
-    turn(dy > 0 ? "D" : "U");
+// ============ 十一、一帧的逻辑更新 ============
+
+function update(dt) {
+  tickKeyboard(dt);
+  // 炮台实际位置朝 wantX 平滑靠拢，键盘/鼠标/触摸都只改目标，动作就很"跟手"
+  player.x += (player.wantX - player.x) * Math.min(1, dt / 90);
+
+  tickWave(dt);
+  tickSpawn(dt);
+  tickCannon(dt);
+  tickBullets(dt);
+  tickZombies(dt);
+  tickEffects(dt);
+}
+
+// ============ 十二、开始 / 结束 ============
+
+function startGame() {
+  player.x = player.wantX = W / 2;
+  player.aim = -Math.PI / 2;
+  player.hp = player.maxHp = 100;
+  player.dmg = 6; player.fireInterval = 320; player.bulletSpeed = 460;
+  player.shots = 1; player.pierce = 0; player.slowPct = 0;
+  player.xp = 0; player.level = 1; player.xpNext = 12;
+  player.fireCd = 0; player.flash = 0; player.shake = 0;
+
+  wave = 1; waveTimer = 0; spawnCd = 300; kills = 0; score = 0;
+  zombies.length = 0; bullets.length = 0; parts.length = 0; floaters.length = 0; cards.length = 0;
+
+  gameMs = 0;
+  state = "playing";
+}
+
+function gameOver() {
+  state = "over";
+  overMsg = "撑到第 " + wave + " 波 · 击杀 " + kills;
+  if (score > highScore) {
+    highScore = score;
+    try { localStorage.setItem(HS_KEY, String(highScore)); } catch (e) {}
   }
-}, { passive: false });
+}
 
-// ============ 九·五、虚拟摇杆：手机上的"手柄" ============
+// ============ 十三、把当前状态画到屏幕上 ============
 
-// 一个圆形底盘 + 一个可拖动的把手。手指按住拖动时，看把手偏离圆心最多的
-// 那根轴来决定上/下/左/右，复用 turn() 走键盘同一道门；反推就是掉头。
-(function () {
-  const base = document.getElementById("stick");
-  const knob = document.getElementById("stickKnob");
-  const MAX  = 36;   // 把手能被推出去的最大像素（调小→手指行程短、轻推就到底，更跟手）
-  const DEAD = 8;    // 死区：推这么一点以内不算方向。调小→更灵敏（原 16，普遍觉得太钝）
-  const DIAG = 1.3;  // 斜向灰区：主轴超过另一轴这么多倍才算真想往那边转，45°附近不换向
-  const REV  = 2.2;  // 反向(掉头)更严：接近正后方才触发 180 度回转，防手滑横扫把自己送死
-  let active = false;
-  let lastDir = null;
-  let cx = 0, cy = 0;                 // 底盘中心在屏幕上的坐标
+/** 圆角矩形小工具（Canvas 没有现成的，Java 版用 fillRoundRect 那种）*/
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
 
-  function setKnob(dx, dy) {
-    knob.style.transform = "translate(" + dx + "px, " + dy + "px)";
+function drawBackground() {
+  // 天空渐变：从上往下由深到稍亮
+  const grd = g.createLinearGradient(0, 0, 0, H);
+  grd.addColorStop(0, rgb(C.skyTop));
+  grd.addColorStop(1, rgb(C.skyBot));
+  g.fillStyle = grd;
+  g.fillRect(0, 0, W, H);
+
+  // 淡淡的网格，给点"战场地板"的感觉
+  g.strokeStyle = rgb(C.grid, 0.25);
+  g.lineWidth = 1;
+  for (let x = 0; x <= W; x += 40) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, WALL_Y); g.stroke(); }
+  for (let y = 0; y <= WALL_Y; y += 40) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+}
+
+function drawWall() {
+  // 城墙本体
+  g.fillStyle = rgb(C.wallBody);
+  g.fillRect(0, WALL_Y, W, H - WALL_Y);
+  g.fillStyle = rgb(C.wallTop);
+  g.fillRect(0, WALL_Y, W, 8);
+
+  // 血量条压在墙顶：绿→红随血量变化
+  const p = clamp(player.hp / player.maxHp, 0, 1);
+  const col = p > 0.35 ? C.hp : C.hpLow;
+  g.fillStyle = rgb([20, 24, 32]);
+  g.fillRect(10, WALL_Y + 14, W - 20, 14);
+  g.fillStyle = rgb(col);
+  g.fillRect(10, WALL_Y + 14, (W - 20) * p, 14);
+  g.strokeStyle = rgb([0, 0, 0], 0.4);
+  g.lineWidth = 2; g.strokeRect(10, WALL_Y + 14, W - 20, 14);
+  g.fillStyle = rgb([255, 255, 255]);
+  g.font = "bold 11px 'Microsoft YaHei'";
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText(Math.ceil(player.hp) + " / " + player.maxHp, W / 2, WALL_Y + 21);
+}
+
+/** 一只僵尸：身体 blob + 走位摇摆 + 双眼 + 受击闪白 + 头顶血条 */
+function drawZombie(z) {
+  const t = ZTYPE[z.type];
+  const bob = Math.sin(z.wob) * (z.r * 0.12);
+  const x = z.x, y = z.y + bob;
+
+  g.save();
+  g.translate(x, y);
+  // 手臂：两条小短线随相位摆动
+  g.strokeStyle = rgb(t.col);
+  g.lineWidth = Math.max(3, z.r * 0.28);
+  g.lineCap = "round";
+  g.beginPath();
+  g.moveTo(-z.r * 0.6, 0); g.lineTo(-z.r * 1.1, z.r * 0.5 + bob);
+  g.moveTo(z.r * 0.6, 0);  g.lineTo(z.r * 1.1,  z.r * 0.5 - bob);
+  g.stroke();
+  // 身体
+  g.fillStyle = rgb(t.col);
+  g.beginPath(); g.ellipse(0, 0, z.r, z.r * 1.05, 0, 0, 6.283); g.fill();
+  // 受击闪白蒙一层
+  if (z.flash > 0) {
+    g.fillStyle = rgb([255, 255, 255], clamp(z.flash / 90, 0, 1) * 0.8);
+    g.beginPath(); g.ellipse(0, 0, z.r, z.r * 1.05, 0, 0, 6.283); g.fill();
   }
+  // 眼睛（凶一点的红色小点）
+  g.fillStyle = rgb([30, 12, 12]);
+  g.beginPath(); g.arc(-z.r * 0.35, -z.r * 0.15, z.r * 0.16, 0, 6.283);
+  g.arc(z.r * 0.35, -z.r * 0.15, z.r * 0.16, 0, 6.283); g.fill();
+  g.restore();
 
-  // 根据把手偏移决定方向并转向；只在"换了方向"时才下指令，不必每帧都喊。
-  // arc = 掉头时先迈的侧向：看把手在“垂直于主轴”的那根轴上往哪偏，
-  // 于是“想回头时把手偏左就左左回转、偏右就右右回转”。
-  function steer(px, py) {
-    const dx = px - cx;
-    const dy = py - cy;
-    const dist = Math.hypot(dx, dy);
-    const clamp = dist > MAX ? MAX / dist : 1;   // 超出行程就贴在边缘
-    setKnob(dx * clamp, dy * clamp);
-    if (dist < DEAD) return;
-    const ax = Math.abs(dx), ay = Math.abs(dy);
-    const horiz = ax > ay * DIAG;   // 横向明显占优
-    const vert  = ay > ax * DIAG;   // 纵向明显占优
-    if (!horiz && !vert) return;    // 落在斜向灰区：维持当前朝向，不下指令
-    const dir = horiz ? (dx > 0 ? "R" : "L") : (dy > 0 ? "D" : "U");
-    // 反向（会触发 180 度掉头）最危险：要求这一轴压倒性占优、接近正后方才认，
-    // 免得横扫或手滑把往上误判成往下，直接撞死自己。
-    if (dir === BACK[P.dir]) {
-      const dom = horiz ? ax : ay, minor = horiz ? ay : ax;
-      if (dom < minor * REV) return;
-    }
-    // 横着走 → 用纵向偏移定侧向；竖着走 → 用横向偏移定侧向
-    const arc = horiz ? (dy > 0 ? "D" : dy < 0 ? "U" : null)
-                      : (dx > 0 ? "R" : dx < 0 ? "L" : null);
-    if (dir !== lastDir) { lastDir = dir; turn(dir, arc); }
+  // 血条（非满血才画，免得屏幕太碎）
+  if (z.hp < z.maxHp) {
+    const w = z.r * 2, p = clamp(z.hp / z.maxHp, 0, 1);
+    g.fillStyle = rgb([0, 0, 0], 0.5);
+    g.fillRect(x - w / 2, y - z.r - 8, w, 4);
+    g.fillStyle = rgb(C.hp);
+    g.fillRect(x - w / 2, y - z.r - 8, w * p, 4);
   }
+}
 
-  base.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    const r = base.getBoundingClientRect();
-    cx = r.left + r.width / 2;
-    cy = r.top + r.height / 2;
-    active = true;
-    knob.style.transition = "none";        // 拖动时把手实时跟手，不要回弹动画
-    base.setPointerCapture(e.pointerId);   // 手指滑出底盘也继续跟踪
-    if (!P.alive) { restart(); return; }   // 晕了时碰摇杆 = 重开，跟点屏幕 / 空格一致
-    steer(e.clientX, e.clientY);
-  });
-
-  base.addEventListener("pointermove", (e) => {
-    if (!active) return;
-    e.preventDefault();
-    steer(e.clientX, e.clientY);
-  });
-
-  function release() {
-    if (!active) return;
-    active = false;
-    lastDir = null;
-    knob.style.transition = "transform .15s"; // 松手顺滑弹回中心
-    setKnob(0, 0);
+/** 炮台：基座 + 随索敌转动的炮管 + 开火时的炮口火光 */
+function drawCannon() {
+  const x = player.x, y = CANNON_Y;
+  // 炮管
+  g.save();
+  g.translate(x, y);
+  g.rotate(player.aim);
+  g.fillStyle = rgb(C.barrel);
+  roundRect(0, -5, player.r + 16, 10, 5); g.fill();
+  // 炮口火光
+  if (player.flash > 0) {
+    const f = clamp(player.flash / 90, 0, 1);
+    g.fillStyle = rgb(C.muzzle, f);
+    g.beginPath(); g.arc(player.r + 16, 0, 8 + 10 * f, 0, 6.283); g.fill();
   }
-  base.addEventListener("pointerup", release);
-  base.addEventListener("pointercancel", release);
-})();
+  g.restore();
 
-// ============ 十、切到别的标签页就自动暂停 ============
+  // 基座（半圆炮塔）
+  g.fillStyle = rgb(C.cannonDark);
+  g.beginPath(); g.arc(x, y + 4, player.r + 4, Math.PI, 0); g.fill();
+  g.fillStyle = rgb(C.cannon);
+  g.beginPath(); g.arc(x, y + 2, player.r, Math.PI, 0); g.fill();
+  // 高光小点，增加体积感
+  g.fillStyle = rgb([255, 255, 255], 0.25);
+  g.beginPath(); g.arc(x - player.r * 0.35, y - player.r * 0.35, player.r * 0.28, 0, 6.283); g.fill();
+}
 
-// 浏览器会把后台标签页的动画循环拖慢甚至停掉。不处理的话，你切出去回个消息，
-// 回来发现蛇已经自己撞墙了 —— 这里在看不见时停循环，回来再续上。
-// （loop() 里那句 dt 封顶 100 毫秒是第二道保险。）
+function drawBullets() {
+  g.fillStyle = rgb(C.bullet);
+  g.shadowColor = rgb(C.bullet, 0.9);
+  g.shadowBlur = 8;
+  for (const b of bullets) {
+    g.beginPath(); g.arc(b.x, b.y, b.r, 0, 6.283); g.fill();
+  }
+  g.shadowBlur = 0;
+}
+
+function drawParts() {
+  for (const p of parts) {
+    g.fillStyle = rgb(p.col, clamp(p.life / p.max, 0, 1));
+    g.fillRect(p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz);
+  }
+}
+
+function drawFloaters() {
+  g.textAlign = "center"; g.textBaseline = "middle";
+  for (const f of floaters) {
+    g.globalAlpha = clamp(f.life / f.max, 0, 1);
+    g.fillStyle = rgb(f.col);
+    g.font = "bold " + f.size + "px 'Microsoft YaHei'";
+    g.fillText(f.text, f.x, f.y);
+  }
+  g.globalAlpha = 1;
+}
+
+/** 顶部 HUD：波数、得分、等级与经验条 */
+function drawHud() {
+  g.textBaseline = "middle";
+  g.fillStyle = rgb([255, 255, 255]);
+  g.font = "bold 18px 'Microsoft YaHei'";
+  g.textAlign = "left";
+  g.fillText("第 " + wave + " 波", 12, 20);
+  g.textAlign = "right";
+  g.fillText("得分 " + score, W - 12, 20);
+
+  // 经验条压在顶部
+  const xp = clamp(player.xp / player.xpNext, 0, 1);
+  g.fillStyle = rgb([20, 24, 32]);
+  g.fillRect(12, 34, W - 24, 8);
+  g.fillStyle = rgb(C.xp);
+  g.fillRect(12, 34, (W - 24) * xp, 8);
+  g.fillStyle = rgb(C.textDim);
+  g.font = "11px 'Microsoft YaHei'";
+  g.textAlign = "center";
+  g.fillText("Lv." + player.level, W / 2, 50);
+}
+
+/** 覆盖层文字：待开始 / 游戏结束 */
+function drawOverlay() {
+  g.fillStyle = rgb([6, 8, 12], 0.72);
+  g.fillRect(0, 0, W, H);
+  g.textAlign = "center"; g.textBaseline = "middle";
+  if (state === "ready") {
+    g.fillStyle = rgb([255, 226, 128]);
+    g.font = "bold 40px 'Microsoft YaHei'";
+    g.fillText("向僵尸开炮", W / 2, H / 2 - 60);
+    g.fillStyle = rgb([255, 255, 255]);
+    g.font = "16px 'Microsoft YaHei'";
+    g.fillText(isTouch ? "点一下屏幕开始" : "按空格 / 点击开始", W / 2, H / 2 + 4);
+    g.fillStyle = rgb(C.textDim);
+    g.font = "13px 'Microsoft YaHei'";
+    g.fillText("最高分 " + highScore, W / 2, H / 2 + 34);
+  } else if (state === "over") {
+    g.fillStyle = rgb([240, 96, 96]);
+    g.font = "bold 38px 'Microsoft YaHei'";
+    g.fillText("城墙失守", W / 2, H / 2 - 66);
+    g.fillStyle = rgb([255, 255, 255]);
+    g.font = "16px 'Microsoft YaHei'";
+    g.fillText(overMsg, W / 2, H / 2 - 20);
+    g.fillText("得分 " + score + " · 最高 " + highScore, W / 2, H / 2 + 6);
+    g.fillStyle = rgb([255, 226, 128]);
+    g.font = "bold 16px 'Microsoft YaHei'";
+    g.fillText(isTouch ? "点一下再来一局" : "按空格再来一局", W / 2, H / 2 + 46);
+  }
+}
+
+/** 升级选卡界面：半透明纱 + 三张竖排强化卡 */
+function drawLevelUp() {
+  g.fillStyle = rgb([6, 8, 12], 0.7);
+  g.fillRect(0, 0, W, H);
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillStyle = rgb([122, 196, 255]);
+  g.font = "bold 26px 'Microsoft YaHei'";
+  g.fillText("升级！选一个强化", W / 2, cards[0] ? cards[0].rect.y - 48 : 160);
+
+  for (let i = 0; i < cards.length; i++) {
+    const rc = cards[i].rect;
+    g.fillStyle = rgb(C.card);
+    roundRect(rc.x, rc.y, rc.w, rc.h, 10); g.fill();
+    g.strokeStyle = rgb(C.cardEdge, 0.8); g.lineWidth = 2;
+    roundRect(rc.x, rc.y, rc.w, rc.h, 10); g.stroke();
+
+    g.textAlign = "left";
+    g.fillStyle = rgb([255, 255, 255]);
+    g.font = "bold 18px 'Microsoft YaHei'";
+    g.fillText((i + 1) + ". " + cards[i].title, rc.x + 16, rc.y + 22);
+    g.fillStyle = rgb(C.textDim);
+    g.font = "13px 'Microsoft YaHei'";
+    g.fillText(cards[i].desc, rc.x + 16, rc.y + 44);
+  }
+  g.textAlign = "center";
+  g.fillStyle = rgb(C.textDim);
+  g.font = "12px 'Microsoft YaHei'";
+  g.fillText(isTouch ? "点击卡片选择" : "按 1 / 2 / 3 选择", W / 2, cards.length ? cards[cards.length - 1].rect.y + cards[cards.length - 1].rect.h + 24 : 400);
+}
+
+/** 一帧画面总调度 */
+function draw() {
+  // 屏幕震动：整体平移一点点，制造打击感
+  const sh = player.shake;
+  const ox = sh > 0 ? rand(-sh, sh) : 0;
+  const oy = sh > 0 ? rand(-sh, sh) : 0;
+  g.save();
+  g.translate(ox, oy);
+
+  drawBackground();
+  drawWall();
+  drawParts();
+  for (const z of zombies) drawZombie(z);
+  drawBullets();
+  drawCannon();
+  drawFloaters();
+  drawHud();
+
+  g.restore();
+
+  if (state === "levelup") drawLevelUp();
+  else if (state === "ready" || state === "over") drawOverlay();
+}
+
+// ============ 十四、游戏循环：逻辑按毫秒走，画面每帧刷 ============
+
+function loop(ts) {
+  rafId = requestAnimationFrame(loop);
+  if (!lastFrame) lastFrame = ts;
+  let dt = ts - lastFrame;
+  lastFrame = ts;
+  // 切后台回来会有一个巨大的 dt，封顶 100 毫秒防止僵尸"瞬移"
+  if (dt > 100) dt = 100;
+  nowSec = ts / 1000;
+
+  if (state === "playing") { gameMs += dt; update(dt); }
+  else { tickEffects(dt); }   // 暂停/选卡/结束时也让粒子和飘字收个尾
+
+  draw();
+
+  // 帧率读数
+  fpsAcc += dt; fpsCount++;
+  if (fpsAcc >= 500) {
+    fpsShown = Math.round(1000 / (fpsAcc / fpsCount));
+    fpsAcc = 0; fpsCount = 0;
+    const el = document.getElementById("fps");
+    if (el) el.textContent = fpsShown + " fps · 僵尸 " + zombies.length + " · 子弹 " + bullets.length;
+  }
+}
+
+function startLoop() { if (rafId === null) { lastFrame = 0; rafId = requestAnimationFrame(loop); } }
+function stopLoop() { if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; } }
+
+// ============ 十五、切到别的标签页就自动暂停 ============
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) {
-    stopLoop();
-  } else {
-    startLoop(); // startLoop 自己会判断：已经在跑就不重复启动
-  }
+  if (document.hidden) stopLoop();
+  else startLoop();
 });
 
 // ============ 点火 ============
-newGame();
-draw();        // 先画一帧，免得白屏等第一次刷新
 startLoop();
+
 </script>
 
 </body>

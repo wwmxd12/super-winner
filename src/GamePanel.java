@@ -4,6 +4,7 @@ import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.GradientPaint;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
@@ -11,382 +12,671 @@ import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseMotionAdapter;
+import java.awt.geom.RoundRectangle2D;
+import java.util.ArrayList;
 import java.util.Random;
 
 /**
- * 游戏的真正心脏。它做三件事：
- *   每隔一段时间"走一步"（update）→ 判断吃没吃到、死没死 → 把整个棋盘重新画一遍（draw）
- * 这个"走-画-走-画"的圈，就是所谓的"游戏循环"。
+ * 游戏的真正心脏：《向僵尸开炮》。
+ * 底部一台炮台自动索敌开火，僵尸从上方一波波涌下来啃城墙。
+ * 每 16 毫秒"走一步"(update) → 移动炮台/子弹/僵尸、判命中、算升级 → 重画整屏(draw)。
+ * 这份是 docs/index.html 网页版的"Java 孪生版"，方法名和执行顺序刻意两边一一对应。
  */
 public class GamePanel extends JPanel implements ActionListener {
 
-    // ============ 一、棋盘的物理设定（先把"格子纸"量好尺寸）============
-    static final int UNIT_SIZE = 20;                       // 一个格子边长 20 像素
-    static final int GAME_UNITS = 25;                      // 横竖各 25 个格子
-    static final int PANEL_SIZE = UNIT_SIZE * GAME_UNITS;  // 所以面板是 500 x 500 像素
-    static final int DELAY = 130;                          // 每隔 130 毫秒走一步（数字越小蛇越快）
+    // ============ 一、战场物理设定 ============
+    static final int W = 480;             // 逻辑宽
+    static final int H = 640;             // 逻辑高
+    static final int WALL_Y = H - 56;     // 城墙顶沿线：僵尸越过这条线就啃墙
+    static final int CANNON_Y = WALL_Y + 6;
+    static final int DELAY = 16;          // 每 16 毫秒一帧 ≈ 60fps，图个丝滑
+    static final double DT = DELAY;       // 逻辑里统一用这个固定步长（毫秒）
+    static final double MOVE_SPEED = 380; // 键盘平移速度 px/s
 
-    // ============ 二、蛇和食物的数据 ============
-    // 蛇的身体 = 一串坐标。数组下标 0 是蛇头，最后一个是有身长的最后一节。
-    // 数组长度开到"格子总数"，因为蛇理论上最长就是把棋盘占满，够用了。
-    final int[] snakeX = new int[GAME_UNITS * GAME_UNITS];
-    final int[] snakeY = new int[GAME_UNITS * GAME_UNITS];
-    int bodyParts;          // 蛇现在有几节
-    int applesEaten;        // 吃了几颗苹果，也就是得分
-    int appleX;             // 苹果所在格子的左上角像素 x
-    int appleY;             // 苹果所在格子的左上角像素 y
-    char direction;         // 蛇头朝向：'U'上 'D'下 'L'左 'R'右
-    boolean running;        // true = 游戏进行中，false = 已经死了/暂停
-    int highScore;          // 本局之前的最高分（重启后保留）
+    // ============ 二、配色表：想换造型只改这里 ============
+    static final Color SKY_TOP   = new Color(16, 20, 28);
+    static final Color SKY_BOT   = new Color(26, 32, 44);
+    static final Color GRID      = new Color(40, 50, 66);
+    static final Color WALL_TOP  = new Color(88, 98, 116);
+    static final Color WALL_BODY = new Color(54, 62, 78);
+    static final Color CANNON    = new Color(120, 170, 232);
+    static final Color CANNON_DK = new Color(54, 96, 158);
+    static final Color BARREL    = new Color(206, 224, 248);
+    static final Color MUZZLE    = new Color(255, 226, 128);
+    static final Color BULLET    = new Color(255, 214, 92);
+    static final Color HP        = new Color(92, 220, 130);
+    static final Color HP_LOW    = new Color(240, 96, 96);
+    static final Color XP        = new Color(122, 196, 255);
+    static final Color TEXT_DIM  = new Color(150, 166, 184);
+    static final Color CARD_BG   = new Color(30, 38, 52);
+    static final Color CARD_EDGE = new Color(120, 170, 232);
 
-    final Timer timer;                  // 一个"闹钟"，每 DELAY 毫秒 ringing 一次
-    final Random random = new Random(); // 用来随机扔苹果
+    static final Color Z_WALKER = new Color(96, 176, 92);
+    static final Color Z_RUNNER = new Color(208, 150, 70);
+    static final Color Z_TANK   = new Color(150, 84, 170);
+    static final Color Z_BOSS   = new Color(220, 72, 84);
 
-    // ============ 配色 & 字体：想让蛇换个造型，只改这一块就够了 ============
-    static final Color BG_DARK    = new Color(14, 16, 14);   // 棋盘格深的那一格
-    static final Color BG_LIGHT   = new Color(24, 28, 24);   // 棋盘格浅的那一格
-    static final Color SNAKE_HEAD = new Color(126, 235, 96); // 蛇头：嫩绿
-    static final Color SNAKE_MID  = new Color(92, 210, 70);  // 身体浅绿条纹
-    static final Color SNAKE_DARK = new Color(46, 170, 32);  // 身体深绿条纹
-    static final Color APPLE_BODY = new Color(255, 88, 96);  // 苹果本体
-    static final Color APPLE_LEAF = new Color(126, 214, 96); // 苹果叶子
-    static final Color TONGUE     = new Color(255, 120, 150);// 小舌头
+    // 画面里的中文统一用微软雅黑：纯英文字体不含汉字会画成方框
+    static final Font FONT_HUD   = new Font("Microsoft YaHei", Font.BOLD, 18);
+    static final Font FONT_SMALL = new Font("Microsoft YaHei", Font.PLAIN, 13);
+    static final Font FONT_TINY  = new Font("Microsoft YaHei", Font.PLAIN, 11);
+    static final Font FONT_TITLE = new Font("Microsoft YaHei", Font.BOLD, 40);
+    static final Font FONT_SUB   = new Font("Microsoft YaHei", Font.BOLD, 26);
 
-    // 画面里的中文统一用微软雅黑：Consolas 这类纯英文字体不含汉字，会画成方框
-    static final Font FONT_SCORE = new Font("Microsoft YaHei", Font.BOLD, 16);
-    static final Font FONT_TITLE = new Font("Microsoft YaHei", Font.BOLD, 32);
-    static final Font FONT_TIP   = new Font("Microsoft YaHei", Font.PLAIN, 18);
+    // ============ 三、玩家（炮台 + 成长属性）============
+    double px, wantX, aim;   // 炮台中心 x、想去的 x、炮管朝向(弧度)
+    final int PR = 20;       // 炮台碰撞半径
+    int hp, maxHp;
+    double dmg, fireInterval, bulletSpeed;
+    int shots, pierce;
+    double slowPct;
+    int xp, level, xpNext;
+    double fireCd, flash, shake;
+
+    // ============ 四、战局数据 ============
+    int wave;
+    double waveTimer, spawnCd;
+    int kills, score;
+    int highScore = 0;
+
+    // 状态：0=待开始 1=进行中 2=升级选卡 3=结束
+    static final int READY = 0, PLAYING = 1, LEVELUP = 2, OVER = 3;
+    int state = READY;
+
+    final ArrayList<Zombie> zombies = new ArrayList<>();
+    final ArrayList<Bullet> bullets = new ArrayList<>();
+    final ArrayList<Part> parts = new ArrayList<>();
+    final ArrayList<Floater> floaters = new ArrayList<>();
+    final ArrayList<Integer> cardIdx = new ArrayList<>();   // 当前三张卡对应的升级编号
+    final int[] cardX = new int[3], cardY = new int[3], cardW = new int[3], cardH = new int[3];
+    String overMsg = "";
+
+    final Timer timer;
+    final Random random = new Random();
+
+    // ============ 五、强化卡池：想加新强化只在这里加一列 ============
+    static final String[] U_KEY = {"dmg", "rate", "shot", "spd", "pierce", "slow", "repair", "hp"};
+    static final String[] U_TITLE = {"火力强化", "加特林", "多重炮管", "高速弹", "穿甲弹", "冰缓立场", "修补城墙", "加固城墙"};
+    static final String[] U_DESC = {
+        "单发伤害 +35%", "射速 +18%", "弹幕 +1 发", "弹速 +16%",
+        "子弹额外穿透 +1", "僵尸减速 +8%", "城墙回复 30 并加厚", "城墙上限 +30 并回满",
+    };
+
+    // 三种小实体，各用一个静态内部类装数据（相当于网页版里的对象字面量）
+    static class Zombie {
+        double x, y, r, hp, maxHp, spd, wob, flash;
+        String type;
+        Color col;
+        int pts;
+    }
+    static class Bullet {
+        double x, y, vx, vy, dmg;
+        int pierce, hit;
+        double r = 4;
+    }
+    static class Part {
+        double x, y, vx, vy, life, max, sz;
+        Color col;
+    }
+    static class Floater {
+        double x, y, vy, life, max, size;
+        String text;
+        Color col;
+    }
 
     GamePanel() {
-        // 告诉窗口："我需要 500x500 的地方" （SnakeGame 里的 pack() 就是来读这个值）
-        setPreferredSize(new Dimension(PANEL_SIZE, PANEL_SIZE));
-        setBackground(Color.BLACK);   // 画布底色：黑色
-        setFocusable(true);           // 允许这个面板"拿到键盘焦点"，否则收不到按键
-        addKeyListener(new TAdapter());// 装上键盘监听器（下面最内层那个类）
+        setPreferredSize(new Dimension(W, H));
+        setBackground(Color.BLACK);
+        setFocusable(true);
+        addKeyListener(new TAdapter());
+        addMouseListener(new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e) { handlePress(e.getX(), e.getY()); }
+        });
+        addMouseMotionListener(new MouseMotionAdapter() {
+            @Override public void mouseMoved(MouseEvent e) { handleMove(e.getX()); }
+            @Override public void mouseDragged(MouseEvent e) { handleMove(e.getX()); }
+        });
 
-        timer = new Timer(DELAY, this); // this 表示"闹钟响了就回调我的 actionPerformed 方法"
-        newGame();
-        timer.start();                  // 拧开闹钟，游戏循环开始转
+        timer = new Timer(DELAY, this);
+        startGame();     // 摆好初始状态
+        state = READY;   // 开局先进"待开始"画面，等空格/点击
+        timer.start();
     }
 
     /** 把一局的所有初始状态摆好 */
-    private void newGame() {
-        direction = 'R';
-        bodyParts = 6;
-        applesEaten = 0;
-        running = true;
-
-        // 初始的蛇：横躺在左上角，占据 (5,5)、(4,5)、(3,5)... 这些格子，头在最右边
-        // 注意 snakeX[0] 是蛇头，越往后越靠近蛇尾
-        for (int i = 0; i < bodyParts; i++) {
-            snakeX[i] = (5 - i) * UNIT_SIZE;
-            snakeY[i] = 5 * UNIT_SIZE;
-        }
-        newApple();
+    private void startGame() {
+        px = wantX = W / 2.0;
+        aim = -Math.PI / 2;
+        hp = maxHp = 100;
+        dmg = 6; fireInterval = 320; bulletSpeed = 460;
+        shots = 1; pierce = 0; slowPct = 0;
+        xp = 0; level = 1; xpNext = 12;
+        fireCd = 0; flash = 0; shake = 0;
+        wave = 1; waveTimer = 0; spawnCd = 300; kills = 0; score = 0;
+        zombies.clear(); bullets.clear(); parts.clear(); floaters.clear(); cardIdx.clear();
+        state = PLAYING;
     }
 
-    /** 在棋盘上随机扔一颗苹果，且不能扔到蛇身上 */
-    private void newApple() {
-        while (true) {
-            appleX = random.nextInt(GAME_UNITS) * UNIT_SIZE; // 先选第几列，再换算成像素
-            appleY = random.nextInt(GAME_UNITS) * UNIT_SIZE; // 先选第几行，再换算成像素
+    private void gameOver() {
+        state = OVER;
+        overMsg = "撑到第 " + wave + " 波 · 击杀 " + kills;
+        if (score > highScore) highScore = score;
+    }
 
-            // 检查这个格子有没有被蛇身占用，没有才作数
-            boolean onSnake = false;
-            for (int i = 0; i < bodyParts; i++) {
-                if (snakeX[i] == appleX && snakeY[i] == appleY) {
-                    onSnake = true;
+    // ============ 六、每帧回调 ============
+    @Override
+    public void actionPerformed(ActionEvent e) {
+        if (state == PLAYING) {
+            update(DT);
+        } else {
+            tickEffects(DT);   // 暂停/选卡/结束时也让粒子和飘字收个尾
+        }
+        repaint();
+    }
+
+    /** 一帧的全部逻辑：跟网页版 update(dt) 一步步对应 */
+    private void update(double dt) {
+        // 键盘左右键持续推 wantX
+        if (keyLeft) wantX -= MOVE_SPEED * dt / 1000;
+        if (keyRight) wantX += MOVE_SPEED * dt / 1000;
+        clampCannon();
+        // 炮台实际位置朝 wantX 平滑靠拢
+        px += (wantX - px) * Math.min(1, dt / 90);
+
+        tickWave(dt);
+        tickSpawn(dt);
+        tickCannon(dt);
+        tickBullets(dt);
+        tickZombies(dt);
+        tickEffects(dt);
+    }
+
+    private void clampCannon() {
+        wantX = clamp(wantX, PR + 4, W - PR - 4);
+    }
+
+    // ---- 波次与出场 ----
+    private double waveHp() { return 1 + (wave - 1) * 0.32; }
+    private double spawnGap() { return Math.max(260, 1050 - wave * 68); }
+
+    private void tickWave(double dt) {
+        waveTimer += dt;
+        if (waveTimer >= 16000) {
+            waveTimer = 0;
+            wave++;
+            if (wave % 5 == 0) spawnZombie("boss");
+            floatUp(W / 2, 96, "第 " + wave + " 波", MUZZLE, 22);
+        }
+    }
+
+    private void tickSpawn(double dt) {
+        spawnCd -= dt;
+        if (spawnCd <= 0) {
+            spawnCd = spawnGap();
+            double roll = random.nextDouble();
+            String type;
+            if (wave >= 3 && roll < 0.16) type = "runner";
+            else if (wave >= 4 && roll < 0.28) type = "tank";
+            else if (roll < 0.7) type = "walker";
+            else type = "runner";
+            spawnZombie(type);
+        }
+    }
+
+    private void spawnZombie(String type) {
+        double br, hpMul, spdMul, pts;
+        Color col;
+        switch (type) {
+            case "runner" -> { br = 11; hpMul = 0.6; spdMul = 1.9; pts = 15; col = Z_RUNNER; }
+            case "tank"   -> { br = 22; hpMul = 3.4; spdMul = 0.62; pts = 30; col = Z_TANK; }
+            case "boss"   -> { br = 38; hpMul = 20;  spdMul = 0.5;  pts = 300; col = Z_BOSS; }
+            default       -> { br = 15; hpMul = 1.0; spdMul = 1.0;  pts = 10; col = Z_WALKER; }
+        }
+        Zombie z = new Zombie();
+        z.type = type;
+        z.r = br;
+        z.x = rand(30, W - 30);
+        z.y = -z.r;
+        z.hp = z.maxHp = hpMul * waveHp();
+        z.spd = rand(38, 52) * spdMul;
+        z.wob = rand(0, 6.28);
+        z.flash = 0;
+        z.col = col;
+        z.pts = (int) pts;
+        zombies.add(z);
+        if (type.equals("boss")) shake = Math.max(shake, 8);
+    }
+
+    // ---- 炮台索敌与开火 ----
+    private Zombie nearestZombie() {
+        Zombie best = null;
+        double bd = Double.MAX_VALUE;
+        for (Zombie z : zombies) {
+            double d = Math.hypot(z.x - px, z.y - CANNON_Y);
+            if (d < bd) { bd = d; best = z; }
+        }
+        return best;
+    }
+
+    private void tickCannon(double dt) {
+        Zombie tgt = nearestZombie();
+        double aimTo = (tgt == null) ? -Math.PI / 2 : Math.atan2(tgt.y - CANNON_Y, tgt.x - px);
+        double diff = aimTo - aim;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        aim += diff * Math.min(1, dt / 60);
+
+        fireCd -= dt;
+        if (fireCd <= 0 && tgt != null) {
+            fireVolley();
+            fireCd = fireInterval;
+        }
+    }
+
+    private void fireVolley() {
+        int n = shots;
+        double spread = (n == 1) ? 0 : 0.16 * (n - 1);
+        double mx = px + Math.cos(aim) * (PR + 8);
+        double my = CANNON_Y + Math.sin(aim) * (PR + 8);
+        for (int i = 0; i < n; i++) {
+            double a = (n == 1) ? aim : aim - spread / 2 + spread * (i / (double) (n - 1));
+            Bullet b = new Bullet();
+            b.x = mx; b.y = my;
+            b.vx = Math.cos(a) * bulletSpeed;
+            b.vy = Math.sin(a) * bulletSpeed;
+            b.dmg = dmg; b.pierce = pierce; b.hit = 0;
+            bullets.add(b);
+        }
+        flash = 90;
+    }
+
+    private void tickBullets(double dt) {
+        for (int i = bullets.size() - 1; i >= 0; i--) {
+            Bullet b = bullets.get(i);
+            b.x += b.vx * dt / 1000;
+            b.y += b.vy * dt / 1000;
+            if (b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) {
+                bullets.remove(i); continue;
+            }
+            for (int j = zombies.size() - 1; j >= 0; j--) {
+                Zombie z = zombies.get(j);
+                if (Math.hypot(b.x - z.x, b.y - z.y) < z.r + b.r) {
+                    hitZombie(z, j, b.dmg);
+                    b.hit++;
+                    if (b.hit > b.pierce) bullets.remove(i);
                     break;
                 }
             }
-            if (!onSnake) {
-                return; // 位置干净，苹果放下，方法结束
+        }
+    }
+
+    private void tickZombies(double dt) {
+        double slow = 1 - slowPct / 100;
+        for (int i = zombies.size() - 1; i >= 0; i--) {
+            Zombie z = zombies.get(i);
+            z.y += z.spd * slow * dt / 1000;
+            z.wob += dt / 1000 * 6;
+            if (z.flash > 0) z.flash -= dt;
+            if (z.y + z.r >= WALL_Y) {
+                int bite = switch (z.type) {
+                    case "boss" -> 26;
+                    case "tank" -> 12;
+                    default -> 7;
+                };
+                damageWall(bite);
+                burst(z.x, WALL_Y, new Color(190, 60, 70), 10);
+                zombies.remove(i);
             }
         }
     }
 
-    // ============ 三、闹钟响了就走这一步 ============
+    private void hitZombie(Zombie z, int index, double d) {
+        z.hp -= d;
+        z.flash = 90;
+        floatUp(z.x, z.y - z.r, "-" + Math.round(d), Color.WHITE, 12);
+        if (z.hp <= 0) killZombie(z, index);
+    }
 
-    /**
-     * Timer 每 130 毫秒调用它一次。这就是"游戏的一帧"。
-     * 注意：这个方法是 Swing 帮你调用的，你自己永远不会手写 timer 去叫它。
-     */
+    private void killZombie(Zombie z, int index) {
+        score += z.pts;
+        kills++;
+        burst(z.x, z.y, z.col, z.type.equals("boss") ? 26 : 12);
+        gainXp(z.type.equals("boss") ? 8 : 1);
+        if (z.type.equals("boss")) shake = Math.max(shake, 10);
+        zombies.remove(index);
+    }
+
+    private void damageWall(int amount) {
+        hp -= amount;
+        shake = Math.max(shake, 7);
+        floatUp(W / 2, WALL_Y - 12, "-" + amount, HP_LOW, 16);
+        if (hp <= 0) { hp = 0; gameOver(); }
+    }
+
+    // ---- 升级选卡 ----
+    private void gainXp(int n) {
+        xp += n;
+        while (xp >= xpNext) {
+            xp -= xpNext;
+            level++;
+            xpNext = (int) Math.round(xpNext * 1.4) + 4;
+            openLevelUp();
+        }
+    }
+
+    private void openLevelUp() {
+        cardIdx.clear();
+        ArrayList<Integer> pool = new ArrayList<>();
+        for (int i = 0; i < U_KEY.length; i++) pool.add(i);
+        for (int i = 0; i < 3 && !pool.isEmpty(); i++) {
+            cardIdx.add(pool.remove(random.nextInt(pool.size())));
+        }
+        int cw = 300, ch = 62, gap = 14;
+        int totalH = cardIdx.size() * ch + (cardIdx.size() - 1) * gap;
+        int y0 = (H - totalH) / 2;
+        for (int i = 0; i < cardIdx.size(); i++) {
+            cardX[i] = (W - cw) / 2; cardY[i] = y0 + i * (ch + gap); cardW[i] = cw; cardH[i] = ch;
+        }
+        state = LEVELUP;
+    }
+
+    private void chooseCard(int i) {
+        if (i < 0 || i >= cardIdx.size()) return;
+        applyUpgrade(cardIdx.get(i));
+        floatUp(W / 2, H / 2 - 60, U_TITLE[cardIdx.get(i)], XP, 20);
+        state = PLAYING;
+    }
+
+    private void applyUpgrade(int idx) {
+        switch (U_KEY[idx]) {
+            case "dmg"    -> dmg *= 1.35;
+            case "rate"   -> fireInterval = Math.max(70, fireInterval * 0.82);
+            case "shot"   -> shots += 1;
+            case "spd"    -> bulletSpeed *= 1.16;
+            case "pierce" -> pierce += 1;
+            case "slow"   -> slowPct = Math.min(70, slowPct + 8);
+            case "repair" -> { maxHp += 12; hp = Math.min(maxHp, hp + 30); }
+            case "hp"     -> { maxHp += 30; hp = Math.min(maxHp, hp + 30); }
+        }
+    }
+
+    // ---- 粒子与飘字 ----
+    private void burst(double x, double y, Color col, int n) {
+        for (int i = 0; i < n; i++) {
+            Part p = new Part();
+            double a = rand(0, 6.28), s = rand(40, 220);
+            p.x = x; p.y = y;
+            p.vx = Math.cos(a) * s; p.vy = Math.sin(a) * s;
+            p.life = p.max = rand(280, 620);
+            p.col = col; p.sz = rand(2, 4);
+            parts.add(p);
+        }
+    }
+
+    private void floatUp(double x, double y, String text, Color col, double size) {
+        Floater f = new Floater();
+        f.x = x; f.y = y; f.vy = -34; f.life = f.max = 700;
+        f.text = text; f.col = col; f.size = size;
+        floaters.add(f);
+    }
+
+    private void tickEffects(double dt) {
+        for (int i = parts.size() - 1; i >= 0; i--) {
+            Part p = parts.get(i);
+            p.x += p.vx * dt / 1000; p.y += p.vy * dt / 1000;
+            p.vy += 520 * dt / 1000;
+            p.life -= dt;
+            if (p.life <= 0) parts.remove(i);
+        }
+        for (int i = floaters.size() - 1; i >= 0; i--) {
+            Floater f = floaters.get(i);
+            f.y += f.vy * dt / 1000;
+            f.life -= dt;
+            if (f.life <= 0) floaters.remove(i);
+        }
+        if (flash > 0) flash -= dt;
+        if (shake > 0) shake = Math.max(0, shake - dt / 40);
+    }
+
+    // ============ 七、把当前状态画到屏幕上 ============
     @Override
-    public void actionPerformed(ActionEvent e) {
-        if (running) {
-            move();       // 1. 更新状态：蛇挪一格、判断吃到/撞死
-        }
-        repaint();        // 2. 请求重画画面（它会自动回调下面的 paintComponent）
-    }
-
-    /** 核心：让蛇往前挪一格 */
-    private void move() {
-        // 【第 1 步】身体依次前移：第 i 节跑到第 i-1 节的位置，整条蛇像蠕动一样往前跟
-        for (int i = bodyParts; i > 0; i--) {
-            snakeX[i] = snakeX[i - 1];
-            snakeY[i] = snakeY[i - 1];
-        }
-
-        // 【第 2 步】单独算蛇头的新位置（头是最先动的那个，其它节只是"跟上"）
-        switch (direction) {
-            case 'U' -> snakeY[0] = snakeY[0] - UNIT_SIZE;
-            case 'D' -> snakeY[0] = snakeY[0] + UNIT_SIZE;
-            case 'L' -> snakeX[0] = snakeX[0] - UNIT_SIZE;
-            case 'R' -> snakeX[0] = snakeX[0] + UNIT_SIZE;
-        }
-
-        // 【第 3 步】吃到苹果了吗？吃到了就把尾巴"还回来"，于是蛇变长一节
-        // 为什么是判断第 0 节？因为经过第 1 步的蠕动，原来的第 1 节已经顶到蛇头的位置上了。
-        if (snakeX[0] == appleX && snakeY[0] == appleY) {
-            bodyParts++;
-            applesEaten++;
-            newApple();
-        }
-
-        // 【第 4 步】撞墙或撞自己？
-        checkCollisions();
-    }
-
-    private void checkCollisions() {
-        // 情况 A：蛇头撞到四条边框（像素坐标跑出 0 ~ 500 之外）
-        if (snakeX[0] < 0 || snakeX[0] >= PANEL_SIZE
-                || snakeY[0] < 0 || snakeY[0] >= PANEL_SIZE) {
-            running = false;
-        }
-
-        // 情况 B：蛇头撞到自己身上。
-        // 从 i = 1 开始比，因为第 0 节就是蛇头自己，不能跟自己撞。
-        for (int i = 1; i < bodyParts; i++) {
-            if (snakeX[i] == snakeX[0] && snakeY[i] == snakeY[0]) {
-                running = false;
-            }
-        }
-
-        // 死了就关掉闹钟，游戏循环停止转动
-        if (!running) {
-            timer.stop();
-        }
-    }
-
-    // ============ 四、把当前状态画到屏幕上 ============
-
-    /**
-     * Swing 负责调用它来"画一版画面"。我们只管画，不用管什么时候画。
-     * g 可以想象成"一支笔"，所有图形都靠它落色。
-     */
-    @Override
-    protected void paintComponent(Graphics g) {
-        super.paintComponent(g); // 先按规矩把上一帧擦干净（不清的话蛇会有残影）
-
-        // 把笔升级成"马克笔" Graphics2D，并打开抗锯齿开关——
-        // 不开的话，画出来的圆和圆角全是马赛克阶梯；开了才滑，这是"变可爱"的第一步。
-        Graphics2D g2 = (Graphics2D) g;
+    protected void paintComponent(Graphics gg) {
+        super.paintComponent(gg);
+        Graphics2D g2 = (Graphics2D) gg;
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         draw(g2);
     }
 
-    /** 一帧画面的总调度：从最底层往上涂，后面的会盖住前面的 */
     private void draw(Graphics2D g2) {
-        drawBoard(g2); // 1. 最底层：棋盘格
+        // 屏幕震动：整体平移一点点，制造打击感
+        double ox = shake > 0 ? rand(-shake, shake) : 0;
+        double oy = shake > 0 ? rand(-shake, shake) : 0;
+        g2.translate(ox, oy);
 
-        if (!running) {
-            // 死了：先蒙一层半透明的黑纱，蛇和字再画在纱上面，就不会变暗
-            g2.setColor(new Color(0, 0, 0, 150));
-            g2.fillRect(0, 0, PANEL_SIZE, PANEL_SIZE);
+        drawBackground(g2);
+        drawWall(g2);
+        drawParts(g2);
+        for (Zombie z : zombies) drawZombie(g2, z);
+        drawBullets(g2);
+        drawCannon(g2);
+        drawFloaters(g2);
+        drawHud(g2);
+
+        g2.translate(-ox, -oy);   // 覆盖层不跟着震
+
+        if (state == LEVELUP) drawLevelUp(g2);
+        else if (state == READY || state == OVER) drawOverlay(g2);
+    }
+
+    private void drawBackground(Graphics2D g2) {
+        GradientPaint grd = new GradientPaint(0, 0, SKY_TOP, 0, H, SKY_BOT);
+        g2.setPaint(grd);
+        g2.fillRect(0, 0, W, H);
+
+        g2.setColor(withAlpha(GRID, 0.25f));
+        for (int x = 0; x <= W; x += 40) g2.drawLine(x, 0, x, WALL_Y);
+        for (int y = 0; y <= WALL_Y; y += 40) g2.drawLine(0, y, W, y);
+    }
+
+    private void drawWall(Graphics2D g2) {
+        g2.setColor(WALL_BODY); g2.fillRect(0, WALL_Y, W, H - WALL_Y);
+        g2.setColor(WALL_TOP);  g2.fillRect(0, WALL_Y, W, 8);
+
+        double p = clamp(hp / (double) maxHp, 0, 1);
+        g2.setColor(new Color(20, 24, 32)); g2.fillRect(10, WALL_Y + 14, W - 20, 14);
+        g2.setColor(p > 0.35 ? HP : HP_LOW); g2.fillRect(10, WALL_Y + 14, (int) ((W - 20) * p), 14);
+        g2.setColor(Color.BLACK); g2.setStroke(new BasicStroke(2));
+        g2.drawRect(10, WALL_Y + 14, W - 20, 14);
+        g2.setStroke(new BasicStroke(1));
+        g2.setColor(Color.WHITE); g2.setFont(FONT_TINY);
+        g2.drawString((int) Math.ceil(hp) + " / " + maxHp, W / 2 - 20, WALL_Y + 25);
+    }
+
+    private void drawZombie(Graphics2D g2, Zombie z) {
+        double bob = Math.sin(z.wob) * (z.r * 0.12);
+        double x = z.x, y = z.y + bob;
+
+        // 手臂
+        g2.setColor(z.col); g2.setStroke(new BasicStroke((float) Math.max(3, z.r * 0.28), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g2.draw(new java.awt.geom.Line2D.Double(x - z.r * 0.6, y, x - z.r * 1.1, y + z.r * 0.5 + bob));
+        g2.draw(new java.awt.geom.Line2D.Double(x + z.r * 0.6, y, x + z.r * 1.1, y + z.r * 0.5 - bob));
+        g2.setStroke(new BasicStroke(1));
+        // 身体
+        g2.setColor(z.col);
+        g2.fillOval((int) (x - z.r), (int) (y - z.r * 1.05), (int) (z.r * 2), (int) (z.r * 2.1));
+        if (z.flash > 0) {
+            g2.setColor(withAlpha(Color.WHITE, (float) (clamp(z.flash / 90, 0, 1) * 0.8)));
+            g2.fillOval((int) (x - z.r), (int) (y - z.r * 1.05), (int) (z.r * 2), (int) (z.r * 2.1));
         }
+        // 眼睛
+        g2.setColor(new Color(30, 12, 12));
+        double er = z.r * 0.16;
+        g2.fillOval((int) (x - z.r * 0.35 - er), (int) (y - z.r * 0.15 - er), (int) (er * 2), (int) (er * 2));
+        g2.fillOval((int) (x + z.r * 0.35 - er), (int) (y - z.r * 0.15 - er), (int) (er * 2), (int) (er * 2));
 
-        drawApple(g2);           // 2. 苹果
-        drawSnake(g2, running);  // 3. 蛇（死了会换成 X X 晕圈圈眼）
-
-        if (running) {
-            drawScore(g2);
-        } else {
-            gameOver(g2);
+        // 血条（非满血才画）
+        if (z.hp < z.maxHp) {
+            int bw = (int) (z.r * 2);
+            double p = clamp(z.hp / z.maxHp, 0, 1);
+            g2.setColor(withAlpha(Color.BLACK, 0.5f));
+            g2.fillRect((int) (x - z.r), (int) (y - z.r - 8), bw, 4);
+            g2.setColor(HP);
+            g2.fillRect((int) (x - z.r), (int) (y - z.r - 8), (int) (bw * p), 4);
         }
     }
 
-    /** 背景：一层若隐若现的棋盘格，像小朋友的爬行垫 */
-    private void drawBoard(Graphics2D g2) {
-        for (int row = 0; row < GAME_UNITS; row++) {
-            for (int col = 0; col < GAME_UNITS; col++) {
-                // 行号 + 列号为偶数就涂深的那格，奇数涂浅的那格，交错出来就是棋盘格
-                g2.setColor(((row + col) % 2 == 0) ? BG_DARK : BG_LIGHT);
-                g2.fillRect(col * UNIT_SIZE, row * UNIT_SIZE, UNIT_SIZE, UNIT_SIZE);
-            }
+    private void drawCannon(Graphics2D g2) {
+        double x = px, y = CANNON_Y;
+        // 炮管（沿 aim 方向的一根圆角条）
+        g2.setColor(BARREL);
+        double len = PR + 16, thick = 10;
+        double ex = x + Math.cos(aim) * len, ey = y + Math.sin(aim) * len;
+        g2.setStroke(new BasicStroke((float) thick, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g2.drawLine((int) x, (int) y, (int) ex, (int) ey);
+        g2.setStroke(new BasicStroke(1));
+        // 炮口火光
+        if (flash > 0) {
+            double f = clamp(flash / 90, 0, 1);
+            g2.setColor(withAlpha(MUZZLE, (float) f));
+            double rr = 8 + 10 * f;
+            g2.fillOval((int) (ex - rr), (int) (ey - rr), (int) (rr * 2), (int) (rr * 2));
+        }
+        // 基座（半圆炮塔）
+        g2.setColor(CANNON_DK);
+        g2.fillArc((int) (x - PR - 4), (int) (y + 4 - PR - 4), (int) ((PR + 4) * 2), (int) ((PR + 4) * 2), 0, 180);
+        g2.setColor(CANNON);
+        g2.fillArc((int) (x - PR), (int) (y + 2 - PR), PR * 2, PR * 2, 0, 180);
+        g2.setColor(withAlpha(Color.WHITE, 0.25f));
+        double hr = PR * 0.28;
+        g2.fillOval((int) (x - PR * 0.35 - hr), (int) (y - PR * 0.35 - hr), (int) (hr * 2), (int) (hr * 2));
+    }
+
+    private void drawBullets(Graphics2D g2) {
+        g2.setColor(BULLET);
+        for (Bullet b : bullets) {
+            g2.fillOval((int) (b.x - b.r), (int) (b.y - b.r), (int) (b.r * 2), (int) (b.r * 2));
         }
     }
 
-    /** 苹果：圆果子 + 亮晶晶的高光 + 头顶一片小叶子 */
-    private void drawApple(Graphics2D g2) {
-        int x = appleX;
-        int y = appleY;
-
-        // 果子本体（往下缩 3 像素，给头顶的叶子留出位置）
-        g2.setColor(APPLE_BODY);
-        g2.fillOval(x + 1, y + 3, UNIT_SIZE - 2, UNIT_SIZE - 4);
-
-        // 高光：左上角一个淡色小圆点，立刻有"刚洗过、亮晶晶"的感觉
-        g2.setColor(new Color(255, 190, 195));
-        g2.fillOval(x + 4, y + 6, 4, 3);
-
-        // 小叶子：斜贴在头顶
-        g2.setColor(APPLE_LEAF);
-        g2.fillOval(x + UNIT_SIZE / 2 - 1, y, 7, 4);
-    }
-
-    /** 蛇：一节一节圆滚滚的"扭扭糖"，脑袋上还有会看方向的眼睛 */
-    private void drawSnake(Graphics2D g2, boolean alive) {
-        // ---- 身体：从尾巴往蛇头画，深绿浅绿隔节相间 ----
-        for (int i = bodyParts - 1; i >= 1; i--) {
-            g2.setColor((i % 2 == 0) ? SNAKE_MID : SNAKE_DARK);
-            // 每一节都向内缩 1 像素，节与节之间留出一道深色的缝，一节一节才看得出来；
-            // 最后一节（尾巴）多缩几像素，收出一个小尖，就不像被刀切平的了。
-            int pad = (i == bodyParts - 1) ? 5 : 1;
-            g2.fillRoundRect(snakeX[i] + pad, snakeY[i] + pad,
-                    UNIT_SIZE - pad * 2, UNIT_SIZE - pad * 2, 12, 12);
+    private void drawParts(Graphics2D g2) {
+        for (Part p : parts) {
+            g2.setColor(withAlpha(p.col, (float) clamp(p.life / p.max, 0, 1)));
+            g2.fillRect((int) (p.x - p.sz / 2), (int) (p.y - p.sz / 2), (int) p.sz, (int) p.sz);
         }
-
-        // ---- 蛇头：比身体大一圈，脑袋显得圆圆的 ----
-        int hx = snakeX[0];
-        int hy = snakeY[0];
-        g2.setColor(SNAKE_HEAD);
-        g2.fillRoundRect(hx - 1, hy - 1, UNIT_SIZE + 2, UNIT_SIZE + 2, 14, 14);
-
-        drawFace(g2, hx, hy, alive);
     }
 
-    /**
-     * 蛇头的表情。alive = true 是圆眼睛 + 吐小舌头；false 是两个 X 当眼睛（晕过去了）。
-     *
-     * 麻烦之处在于：蛇朝哪个方向走，眼睛和舌头就得挪到哪一边。
-     * 如果为四个方向各写一遍坐标，代码会又长又容易错。这里用两个"方向向量"解决：
-     *   forward(fx, fy) = 脸正前方的单位向量，比如朝右就是 (1, 0)
-     *   side   (sx, sy) = 左右分开两只眼的单位向量，永远和 forward 垂直
-     * 这样任何方向都只算一次坐标，换方向只是把这两个向量里的 1 换成 -1。
-     */
-    private void drawFace(Graphics2D g2, int hx, int hy, boolean alive) {
-        int fx = 0, fy = 0;
-        int sx = 0, sy = 0;
-        switch (direction) {
-            case 'U' -> { fy = -1; sx = 1; } // 朝上：脸朝上，两只眼左右排
-            case 'D' -> { fy = 1; sx = 1; }
-            case 'L' -> { fx = -1; sy = 1; } // 朝左：脸朝左，两只眼上下排
-            case 'R' -> { fx = 1; sy = 1; }
+    private void drawFloaters(Graphics2D g2) {
+        for (Floater f : floaters) {
+            g2.setColor(withAlpha(f.col, (float) clamp(f.life / f.max, 0, 1)));
+            g2.setFont(new Font("Microsoft YaHei", Font.BOLD, (int) f.size));
+            g2.drawString(f.text, (int) f.x - 12, (int) f.y);
         }
+    }
 
-        int cx = hx + UNIT_SIZE / 2; // 蛇头的中心点，下面所有五官都拿它当基准
-        int cy = hy + UNIT_SIZE / 2;
+    private void drawHud(Graphics2D g2) {
+        g2.setColor(Color.WHITE); g2.setFont(FONT_HUD);
+        g2.drawString("第 " + wave + " 波", 12, 24);
+        String s = "得分 " + score;
+        g2.drawString(s, W - 12 - g2.getFontMetrics().stringWidth(s), 24);
 
-        // 左右两只眼：side 取 -1 和 +1，就是在中心的基础上往两边各挪 4 像素
-        for (int side = -1; side <= 1; side += 2) {
-            int ex = cx + fx * 3 + sx * 4 * side;
-            int ey = cy + fy * 3 + sy * 4 * side;
+        double xpP = clamp(xp / (double) xpNext, 0, 1);
+        g2.setColor(new Color(20, 24, 32)); g2.fillRect(12, 34, W - 24, 8);
+        g2.setColor(XP); g2.fillRect(12, 34, (int) ((W - 24) * xpP), 8);
+        g2.setColor(TEXT_DIM); g2.setFont(FONT_TINY);
+        g2.drawString("Lv." + level, W / 2 - 14, 52);
+    }
 
-            if (alive) {
-                g2.setColor(Color.WHITE);             // 眼白
-                g2.fillOval(ex - 3, ey - 3, 6, 6);
-                g2.setColor(new Color(40, 40, 40));   // 瞳孔往前挪 1 像素 = 眼神盯着要去的方向
-                g2.fillOval(ex - 2 + fx, ey - 2 + fy, 4, 4);
-            } else {
-                g2.setColor(Color.WHITE);
-                g2.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-                g2.drawLine(ex - 3, ey - 3, ex + 3, ey + 3);
-                g2.drawLine(ex + 3, ey - 3, ex - 3, ey + 3);
-            }
+    private void drawOverlay(Graphics2D g2) {
+        g2.setColor(withAlpha(new Color(6, 8, 12), 0.72f)); g2.fillRect(0, 0, W, H);
+        g2.setColor(MUZZLE); g2.setFont(FONT_TITLE);
+        String t = "向僵尸开炮";
+        g2.drawString(t, W / 2 - g2.getFontMetrics().stringWidth(t) / 2, H / 2 - 50);
+        g2.setColor(Color.WHITE); g2.setFont(FONT_HUD);
+        String tip = state == READY ? "按空格 / 点击开始" : "按空格再来一局";
+        g2.drawString(tip, W / 2 - g2.getFontMetrics().stringWidth(tip) / 2, H / 2 + 10);
+        if (state == OVER) {
+            g2.setColor(HP_LOW); g2.setFont(FONT_SUB);
+            g2.drawString("城墙失守", W / 2 - g2.getFontMetrics().stringWidth("城墙失守") / 2, H / 2 - 100);
+            g2.setColor(Color.WHITE); g2.setFont(FONT_HUD);
+            String om = overMsg;
+            g2.drawString(om, W / 2 - g2.getFontMetrics().stringWidth(om) / 2, H / 2 - 20);
         }
+        g2.setColor(TEXT_DIM); g2.setFont(FONT_SMALL);
+        String hs = "最高分 " + highScore;
+        g2.drawString(hs, W / 2 - g2.getFontMetrics().stringWidth(hs) / 2, H / 2 + 40);
+    }
 
-        if (!alive) {
-            return; // 晕过去的时候舌头就收起来，不吐了
+    private void drawLevelUp(Graphics2D g2) {
+        g2.setColor(withAlpha(new Color(6, 8, 12), 0.7f)); g2.fillRect(0, 0, W, H);
+        g2.setColor(XP); g2.setFont(FONT_SUB);
+        String head = "升级！选一个强化";
+        int topY = cardIdx.isEmpty() ? 160 : cardY[0] - 48;
+        g2.drawString(head, W / 2 - g2.getFontMetrics().stringWidth(head) / 2, topY);
+
+        for (int i = 0; i < cardIdx.size(); i++) {
+            int idx = cardIdx.get(i);
+            g2.setColor(CARD_BG);
+            g2.fill(new RoundRectangle2D.Double(cardX[i], cardY[i], cardW[i], cardH[i], 12, 12));
+            g2.setColor(withAlpha(CARD_EDGE, 0.8f)); g2.setStroke(new BasicStroke(2));
+            g2.draw(new RoundRectangle2D.Double(cardX[i], cardY[i], cardW[i], cardH[i], 12, 12));
+            g2.setStroke(new BasicStroke(1));
+            g2.setColor(Color.WHITE); g2.setFont(FONT_HUD);
+            g2.drawString((i + 1) + ". " + U_TITLE[idx], cardX[i] + 16, cardY[i] + 26);
+            g2.setColor(TEXT_DIM); g2.setFont(FONT_SMALL);
+            g2.drawString(U_DESC[idx], cardX[i] + 16, cardY[i] + 48);
         }
-
-        // 小舌头：从嘴边伸出去，末端分个叉，就是"嘶嘶"那个感觉
-        g2.setColor(TONGUE);
-        g2.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        int mx = cx + fx * 10; // 舌头根，贴在嘴边
-        int my = cy + fy * 10;
-        int tx = cx + fx * 16; // 舌头尖
-        int ty = cy + fy * 16;
-        g2.drawLine(mx, my, tx, ty);
-        // 分叉的两个小尖：在"往前"的基础上，再各自往左右偏 2 像素
-        g2.drawLine(tx, ty, tx + fx * 3 + sx * 2, ty + fy * 3 + sy * 2);
-        g2.drawLine(tx, ty, tx + fx * 3 - sx * 2, ty + fy * 3 - sy * 2);
+        g2.setColor(TEXT_DIM); g2.setFont(FONT_TINY);
+        String tip = "按 1 / 2 / 3 选择";
+        g2.drawString(tip, W / 2 - g2.getFontMetrics().stringWidth(tip) / 2, H / 2 + 150);
     }
 
-    /** 左下角得分、右下角最高分 */
-    private void drawScore(Graphics2D g2) {
-        g2.setColor(Color.WHITE);
-        g2.setFont(FONT_SCORE);
-        g2.drawString("得分 " + applesEaten, UNIT_SIZE, PANEL_SIZE - UNIT_SIZE / 2);
+    // ============ 八、输入 ============
+    boolean keyLeft, keyRight;
 
-        // 最高分靠右对齐：先量出这行字有多宽，再从右边减掉它，数字变长也不会撑破屏幕
-        String text = "最高分 " + highScore;
-        g2.drawString(text, PANEL_SIZE - UNIT_SIZE - g2.getFontMetrics().stringWidth(text),
-                PANEL_SIZE - UNIT_SIZE / 2);
+    private void handleMove(int mx) {
+        if (state == PLAYING) { wantX = clamp(mx, PR + 4, W - PR - 4); }
     }
 
-    private void gameOver(Graphics2D g2) {
-        // 顺手把最高分记下来，供下一局比较
-        if (applesEaten > highScore) {
-            highScore = applesEaten;
-        }
-
-        drawCentered(g2, "蛇蛇晕过去了", FONT_TITLE, new Color(255, 180, 110), PANEL_SIZE / 2 - 40);
-        drawCentered(g2, "本局得分 " + applesEaten, FONT_TIP, Color.WHITE, PANEL_SIZE / 2 + 5);
-        drawCentered(g2, "按空格键再来一次", FONT_TIP, new Color(180, 255, 170), PANEL_SIZE / 2 + 35);
-    }
-
-    /** 小工具：把一行字在 500 像素宽的面板上水平居中 */
-    private void drawCentered(Graphics2D g2, String text, Font font, Color color, int baselineY) {
-        g2.setFont(font);
-        g2.setColor(color);
-        g2.drawString(text, (PANEL_SIZE - g2.getFontMetrics().stringWidth(text)) / 2, baselineY);
-    }
-
-    // ============ 五、键盘：把"按了哪个键"翻译成"蛇该往哪走" ============
-
-    /**
-     * 内部类：一个专职听键盘的小工。TAdapter 继承自 KeyAdapter，
-     * KeyAdapter 已经把另外两个没用的方法（按下/释放）空实现了，我们只重写"按下"。
-     */
-    class TAdapter extends KeyAdapter {
-        @Override
-        public void keyPressed(KeyEvent e) {
-            int code = e.getKeyCode(); // 拿到按键的编号，比如 VK_LEFT 是个整数常量
-
-            // 死了的时候，只认空格 = 重开一局
-            if (!running) {
-                if (code == KeyEvent.VK_SPACE) {
-                    newGame();
-                    timer.start(); // 重新拧开闹钟
-                }
-                return;
-            }
-
-            // 关键设计：只允许"垂直方向"的按键立刻生效。
-            // 因为蛇每 130 毫秒才走一步，如果允许直接改成反方向，
-            // 就会出现"蛇头撞进自己脖子"的 bug，所以这里禁止 180 度掉头。
-            switch (code) {
-                case KeyEvent.VK_LEFT, KeyEvent.VK_A -> {
-                    if (direction != 'L' && direction != 'R') {
-                        direction = 'L';
-                    }
-                }
-                case KeyEvent.VK_RIGHT, KeyEvent.VK_D -> {
-                    if (direction != 'R' && direction != 'L') {
-                        direction = 'R';
-                    }
-                }
-                case KeyEvent.VK_UP, KeyEvent.VK_W -> {
-                    if (direction != 'U' && direction != 'D') {
-                        direction = 'U';
-                    }
-                }
-                case KeyEvent.VK_DOWN, KeyEvent.VK_S -> {
-                    if (direction != 'D' && direction != 'U') {
-                        direction = 'D';
-                    }
+    private void handlePress(int mx, int my) {
+        if (state == LEVELUP) {
+            for (int i = 0; i < cardIdx.size(); i++) {
+                if (mx >= cardX[i] && mx <= cardX[i] + cardW[i] && my >= cardY[i] && my <= cardY[i] + cardH[i]) {
+                    chooseCard(i); return;
                 }
             }
+            return;
+        }
+        if (state == PLAYING) wantX = clamp(mx, PR + 4, W - PR - 4);
+        else startGame();
+    }
+
+    private class TAdapter extends KeyAdapter {
+        @Override public void keyPressed(KeyEvent e) {
+            int k = e.getKeyCode();
+            if (k == KeyEvent.VK_LEFT || k == KeyEvent.VK_A) keyLeft = true;
+            if (k == KeyEvent.VK_RIGHT || k == KeyEvent.VK_D) keyRight = true;
+            if (k == KeyEvent.VK_SPACE) {
+                if (state == READY || state == OVER) startGame();
+            }
+            if (state == LEVELUP) {
+                if (k == KeyEvent.VK_1) chooseCard(0);
+                if (k == KeyEvent.VK_2) chooseCard(1);
+                if (k == KeyEvent.VK_3) chooseCard(2);
+            }
+        }
+        @Override public void keyReleased(KeyEvent e) {
+            int k = e.getKeyCode();
+            if (k == KeyEvent.VK_LEFT || k == KeyEvent.VK_A) keyLeft = false;
+            if (k == KeyEvent.VK_RIGHT || k == KeyEvent.VK_D) keyRight = false;
         }
     }
+
+    // ============ 九、小工具 ============
+    static double clamp(double v, double a, double b) { return v < a ? a : v > b ? b : v; }
+    double rand(double a, double b) { return a + random.nextDouble() * (b - a); }
+    static Color withAlpha(Color c, float a) { return new Color(c.getRed(), c.getGreen(), c.getBlue(), (int) (a * 255)); }
 }
