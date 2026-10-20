@@ -53,6 +53,8 @@ public class GamePanel extends JPanel implements ActionListener {
     static final Color TEXT_DIM  = new Color(150, 166, 184);
     static final Color CARD_BG   = new Color(30, 38, 52);
     static final Color CARD_EDGE = new Color(120, 170, 232);
+    static final Color FIRE      = new Color(255, 150, 60);   // 燃烧/爆炸特效橙
+    static final Color ZAP       = new Color(150, 220, 255);  // 闪电链青蓝
 
     static final Color Z_WALKER = new Color(96, 176, 92);
     static final Color Z_RUNNER = new Color(208, 150, 70);
@@ -74,6 +76,8 @@ public class GamePanel extends JPanel implements ActionListener {
     double dmg, fireInterval, bulletSpeed;
     int shots, pierce;
     double slowPct;
+    // 武器化等级：0=没有，1/2=两档。由升级卡点亮，命中时额外触发对应武器效果
+    int burnTier, splashTier, chainTier, homingTier;
     int xp, level, xpNext;
     double fireCd, flash, shake;
 
@@ -91,6 +95,7 @@ public class GamePanel extends JPanel implements ActionListener {
     final ArrayList<Bullet> bullets = new ArrayList<>();
     final ArrayList<Part> parts = new ArrayList<>();
     final ArrayList<Floater> floaters = new ArrayList<>();
+    final ArrayList<Zap> zaps = new ArrayList<>();            // 闪电链的短暂电弧连线
     final ArrayList<Integer> cardIdx = new ArrayList<>();   // 当前三张卡对应的升级编号
     final int[] cardX = new int[3], cardY = new int[3], cardW = new int[3], cardH = new int[3];
     String overMsg = "";
@@ -116,6 +121,10 @@ public class GamePanel extends JPanel implements ActionListener {
         "冰缓立场", "时间凝滞",
         "修补城墙", "加固城墙", "合金长城",
         "双管齐下", "天基裁决",
+        "燃烧弹", "凝固汽油弹",
+        "火箭弹", "重火箭",
+        "特斯拉线圈", "雷霆链",
+        "追踪弹头", "捕食者导弹",
     };
     static final String[] U_DESC = {
         "单发伤害 +25%", "单发伤害 +45%", "单发伤害 +75%",
@@ -126,6 +135,10 @@ public class GamePanel extends JPanel implements ActionListener {
         "僵尸减速 +10%", "僵尸减速 +22%",
         "立即回复 35 血", "上限 +30 并回 30", "上限 +70 并回满",
         "弹幕 +2 且攻速 +15%", "伤害 +120% 且穿透 +1",
+        "命中燃烧 3 秒·每口 20%", "命中燃烧 4.5 秒·每口 35%",
+        "命中爆炸·60px 溅射 55%", "命中爆炸·95px 溅射 100%",
+        "命中电链 2 个·50%", "命中电链 4 个·75%",
+        "子弹轻微自动追踪", "子弹强力追踪",
     };
     static final int[] U_RAR = {
         0, 1, 2,
@@ -136,12 +149,17 @@ public class GamePanel extends JPanel implements ActionListener {
         1, 3,
         0, 1, 2,
         4, 5,
+        1, 2,
+        2, 3,
+        2, 3,
+        2, 3,
     };
 
     // 三种小实体，各用一个静态内部类装数据（相当于网页版里的对象字面量）
     static class Zombie {
         double x, y, r, hp, maxHp, spd, wob, flash;
         double atk, atkMs, atkCd;   // 啃墙伤害 / 间隔 / 距下一口剩余毫秒
+        double burnAmt, burnMs, burnCd;   // 燃烧：每口伤害 / 剩余毫秒 / 距下一口剩余毫秒
         boolean attacking;          // 是否已抵达城墙开始持续啃墙
         String type;
         Color col;
@@ -160,6 +178,9 @@ public class GamePanel extends JPanel implements ActionListener {
         double x, y, vy, life, max, size;
         String text;
         Color col;
+    }
+    static class Zap {                // 闪电链命中后画一条短暂电弧
+        double x1, y1, x2, y2, life;
     }
 
     GamePanel() {
@@ -188,10 +209,11 @@ public class GamePanel extends JPanel implements ActionListener {
         hp = maxHp = 100;
         dmg = 6; fireInterval = 320; bulletSpeed = 460;
         shots = 1; pierce = 0; slowPct = 0;
+        burnTier = splashTier = chainTier = homingTier = 0;
         xp = 0; level = 1; xpNext = 12;
         fireCd = 0; flash = 0; shake = 0;
         wave = 1; waveTimer = 0; spawnCd = 300; kills = 0; score = 0;
-        zombies.clear(); bullets.clear(); parts.clear(); floaters.clear(); cardIdx.clear();
+        zombies.clear(); bullets.clear(); parts.clear(); floaters.clear(); zaps.clear(); cardIdx.clear();
         state = PLAYING;
     }
 
@@ -335,6 +357,20 @@ public class GamePanel extends JPanel implements ActionListener {
     private void tickBullets(double dt) {
         for (int i = bullets.size() - 1; i >= 0; i--) {
             Bullet b = bullets.get(i);
+            // 追踪弹头：每帧把速度方向朝最近的僵尸掰一点点（只改方向不改速度大小）
+            if (homingTier > 0) {
+                Zombie t = nearestZombieTo(b.x, b.y);
+                if (t != null) {
+                    double cur = Math.atan2(b.vy, b.vx);
+                    double da = Math.atan2(t.y - b.y, t.x - b.x) - cur;
+                    while (da > Math.PI) da -= Math.PI * 2;
+                    while (da < -Math.PI) da += Math.PI * 2;
+                    double turn = (homingTier == 1 ? 2.4 : 4.8) * dt / 1000;   // 最大转向角速度
+                    double na = cur + clamp(da, -turn, turn);
+                    double sp = Math.hypot(b.vx, b.vy);
+                    b.vx = Math.cos(na) * sp; b.vy = Math.sin(na) * sp;
+                }
+            }
             b.x += b.vx * dt / 1000;
             b.y += b.vy * dt / 1000;
             if (b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) {
@@ -344,6 +380,7 @@ public class GamePanel extends JPanel implements ActionListener {
                 Zombie z = zombies.get(j);
                 if (Math.hypot(b.x - z.x, b.y - z.y) < z.r + b.r) {
                     hitZombie(z, j, b.dmg);
+                    applyWeapon(z, b.x, b.y, b.dmg);   // 命中后追加武器化效果
                     b.hit++;
                     if (b.hit > b.pierce) bullets.remove(i);
                     break;
@@ -352,11 +389,86 @@ public class GamePanel extends JPanel implements ActionListener {
         }
     }
 
+    /** 命中后按已点亮的武器等级追加结算：燃烧/爆炸溅射/闪电链 */
+    private void applyWeapon(Zombie target, double ix, double iy, double bdmg) {
+        // 燃烧：给直接命中那只挂上持续掉血（高级覆盖低级）
+        if (burnTier > 0 && target.hp > 0) {
+            target.burnAmt = bdmg * (burnTier == 1 ? 0.20 : 0.35);
+            target.burnMs = Math.max(target.burnMs, burnTier == 1 ? 3000 : 4500);
+            if (target.burnCd <= 0) target.burnCd = 400;
+        }
+        // 爆炸：落点周围圆形溅射
+        if (splashTier > 0) {
+            double rad = splashTier == 1 ? 60 : 95, pct = splashTier == 1 ? 0.55 : 1.0;
+            burst(ix, iy, FIRE, splashTier == 1 ? 8 : 14);
+            for (int i = zombies.size() - 1; i >= 0; i--) {
+                Zombie t = zombies.get(i);
+                if (t == target) continue;
+                if (Math.hypot(ix - t.x, iy - t.y) < rad) hurtZombie(t, bdmg * pct);
+            }
+        }
+        // 闪电链：从直接命中那只开始，一环一环电到旁边的怪
+        if (chainTier > 0) {
+            int n = chainTier == 1 ? 2 : 4;
+            double pct = chainTier == 1 ? 0.50 : 0.75;
+            double sx = target.x, sy = target.y;
+            ArrayList<Zombie> linked = new ArrayList<>();
+            linked.add(target);
+            for (int k = 0; k < n; k++) {
+                Zombie t = nearestZombieTo(sx, sy, linked);
+                if (t == null) break;
+                Zap zp = new Zap();
+                zp.x1 = sx; zp.y1 = sy; zp.x2 = t.x; zp.y2 = t.y; zp.life = 180;
+                zaps.add(zp);
+                hurtZombie(t, bdmg * pct);
+                linked.add(t);
+                sx = t.x; sy = t.y;
+            }
+        }
+    }
+
+    /** 找离 (x,y) 最近的僵尸；skip 里的跳过，没找到返回 null */
+    private Zombie nearestZombieTo(double x, double y, ArrayList<Zombie> skip) {
+        Zombie best = null;
+        double bd = Double.MAX_VALUE;
+        for (Zombie z : zombies) {
+            if (skip != null && skip.contains(z)) continue;
+            double d = Math.hypot(z.x - x, z.y - y);
+            if (d < bd) { bd = d; best = z; }
+        }
+        return best;
+    }
+
+    private Zombie nearestZombieTo(double x, double y) { return nearestZombieTo(x, y, null); }
+
+    /** 溅射/电链/燃烧这类次要伤害专用：自己查下标，死透就结算击杀 */
+    private void hurtZombie(Zombie z, double d) {
+        if (z.hp <= 0) return;
+        z.hp -= d;
+        z.flash = 90;
+        floatUp(z.x, z.y - z.r, "-" + Math.round(d), Color.WHITE, 11);
+        if (z.hp <= 0) {
+            int idx = zombies.indexOf(z);
+            if (idx >= 0) killZombie(z, idx);
+        }
+    }
+
     private void tickZombies(double dt) {
         double slow = 1 - slowPct / 100;
         for (int i = zombies.size() - 1; i >= 0; i--) {
             Zombie z = zombies.get(i);
             if (z.flash > 0) z.flash -= dt;
+            // 燃烧结算：每 0.4 秒掉一口血，烧完为止（啃墙中也照烧）
+            if (z.burnMs > 0) {
+                z.burnMs -= dt;
+                z.burnCd -= dt;
+                if (z.burnCd <= 0) {
+                    z.burnCd = 400;
+                    burst(z.x, z.y, FIRE, 2);
+                    hurtZombie(z, z.burnAmt);
+                    if (z.hp <= 0) continue;   // 被烧死已从列表移除，跳过后续移动
+                }
+            }
             if (!z.attacking) {
                 z.y += z.spd * slow * dt / 1000;
                 z.wob += dt / 1000 * 6;
@@ -464,6 +576,15 @@ public class GamePanel extends JPanel implements ActionListener {
             case 17 -> { maxHp += 70; hp = maxHp; }
             case 18 -> { shots += 2; fireInterval = Math.max(60, fireInterval * 0.87); }
             case 19 -> { dmg *= 2.2; pierce += 1; }
+            // 武器化：同机制取更高等级，不会叠加降档
+            case 20 -> burnTier = Math.max(burnTier, 1);
+            case 21 -> burnTier = Math.max(burnTier, 2);
+            case 22 -> splashTier = Math.max(splashTier, 1);
+            case 23 -> splashTier = Math.max(splashTier, 2);
+            case 24 -> chainTier = Math.max(chainTier, 1);
+            case 25 -> chainTier = Math.max(chainTier, 2);
+            case 26 -> homingTier = Math.max(homingTier, 1);
+            case 27 -> homingTier = Math.max(homingTier, 2);
         }
     }
 
@@ -501,6 +622,10 @@ public class GamePanel extends JPanel implements ActionListener {
             f.life -= dt;
             if (f.life <= 0) floaters.remove(i);
         }
+        for (int i = zaps.size() - 1; i >= 0; i--) {
+            zaps.get(i).life -= dt;
+            if (zaps.get(i).life <= 0) zaps.remove(i);
+        }
         if (flash > 0) flash -= dt;
         if (shake > 0) shake = Math.max(0, shake - dt / 40);
     }
@@ -526,6 +651,7 @@ public class GamePanel extends JPanel implements ActionListener {
         drawParts(g2);
         for (Zombie z : zombies) drawZombie(g2, z);
         drawBullets(g2);
+        drawZaps(g2);
         drawCannon(g2);
         drawFloaters(g2);
         drawHud(g2);
@@ -624,6 +750,20 @@ public class GamePanel extends JPanel implements ActionListener {
         for (Bullet b : bullets) {
             g2.fillOval((int) (b.x - b.r), (int) (b.y - b.r), (int) (b.r * 2), (int) (b.r * 2));
         }
+    }
+
+    /** 闪电链电弧：一条渐渐淡掉的青蓝折线，中段抖一下更像放电 */
+    private void drawZaps(Graphics2D g2) {
+        if (zaps.isEmpty()) return;
+        g2.setStroke(new BasicStroke(2f));
+        for (Zap zp : zaps) {
+            g2.setColor(withAlpha(ZAP, (float) clamp(zp.life / 180, 0, 1)));
+            double mx = (zp.x1 + zp.x2) / 2 + rand(-6, 6);
+            double my = (zp.y1 + zp.y2) / 2 + rand(-6, 6);
+            g2.drawLine((int) zp.x1, (int) zp.y1, (int) mx, (int) my);
+            g2.drawLine((int) mx, (int) my, (int) zp.x2, (int) zp.y2);
+        }
+        g2.setStroke(new BasicStroke(1));
     }
 
     private void drawParts(Graphics2D g2) {

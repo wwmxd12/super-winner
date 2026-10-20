@@ -43,7 +43,7 @@
 <p class="hint">
   <b>电脑</b>：左右移动鼠标 / <b>A D</b> 或 <b>←→</b> 平移炮台，自动瞄准开火 · <b>空格</b> 开始/重开<br>
   <b>手机</b>：手指在屏幕上<b>左右拖动</b>就带着炮台走，松开继续自动开火<br>
-  僵尸一波波从<b>上方</b>涌下来，冲到<b>城墙</b>就掉血；打怪攒<b>经验</b>，<b>升级</b>时三张强化卡选一张，越打越猛<br>
+  僵尸一波波从<b>上方</b>涌下来，冲到<b>城墙</b>就掉血；打怪攒<b>经验</b>，<b>升级</b>时三张强化卡选一张（含燃烧/爆炸/闪电链/追踪等新武器），越打越猛<br>
   每隔几波会杀出一只<b>巨型 Boss</b>，撑到算你狠
 </p>
 <p id="fps">读数初始化中…</p>
@@ -81,6 +81,8 @@ const C = {
   textDim:  [150, 166, 184],
   card:     [30, 38, 52],
   cardEdge: [120, 170, 232],
+  fire:     [255, 150, 60],   // 燃烧/爆炸特效橙
+  zap:      [150, 220, 255],  // 闪电链青蓝
 };
 const rgb = (c, a) => (a === undefined)
   ? `rgb(${c[0]}, ${c[1]}, ${c[2]})`
@@ -117,6 +119,8 @@ const player = {
   shots: 1,                        // 一次散射几发
   pierce: 0,                       // 一发子弹能额外穿几个怪
   slowPct: 0,                      // 减速光环：全场僵尸慢百分之几
+  // 武器化等级：0=没有，1/2=两档。由升级卡点亮，命中时额外触发对应武器效果
+  burnTier: 0, splashTier: 0, chainTier: 0, homingTier: 0,
 
   xp: 0, level: 1, xpNext: 12,     // 经验条与升级门槛
   fireCd: 0,                       // 距离下一炮还攒够毫秒没
@@ -134,6 +138,7 @@ const zombies = [];      // 场上僵尸
 const bullets = [];      // 场上子弹
 const parts = [];        // 死亡碎片粒子
 const floaters = [];     // 飘字（伤害数字 / +经验）
+const zaps = [];         // 闪电链的短暂电弧连线
 const cards = [];        // 升级三选一卡片
 
 // 状态机：ready 待开始 / playing 进行中 / levelup 升级选卡暂停 / over 结束
@@ -186,6 +191,7 @@ function spawnZombie(type) {
     attacking: false, atkCd: 0,  // 是否已在啃墙 / 距下一口剩下的毫秒
     wob: rand(0, 6.28),          // 走路左右摇摆的相位，纯表演
     flash: 0,
+    burnAmt: 0, burnMs: 0, burnCd: 0,   // 燃烧：每口伤害 / 剩余毫秒 / 距下一口剩余毫秒
   });
   // Boss 血厚、居中偏一点出场，顺便震一下屏
   if (type === "boss") { player.shake = Math.max(player.shake, 8); }
@@ -268,6 +274,20 @@ function fireVolley() {
 function tickBullets(dt) {
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
+    // 追踪弹头：每帧把速度方向朝最近的僵尸掰一点点（只改方向不改速度大小）
+    if (player.homingTier > 0) {
+      const t = nearestZombieTo(b.x, b.y);
+      if (t) {
+        const cur = Math.atan2(b.vy, b.vx);
+        let da = Math.atan2(t.y - b.y, t.x - b.x) - cur;
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        const turn = (player.homingTier === 1 ? 2.4 : 4.8) * dt / 1000;   // 最大转向角速度
+        const na = cur + clamp(da, -turn, turn);
+        const sp = Math.hypot(b.vx, b.vy);
+        b.vx = Math.cos(na) * sp; b.vy = Math.sin(na) * sp;
+      }
+    }
     b.x += b.vx * dt / 1000;
     b.y += b.vy * dt / 1000;
     // 飞出屏幕就回收
@@ -279,6 +299,7 @@ function tickBullets(dt) {
       const z = zombies[j];
       if (dist(b.x, b.y, z.x, z.y) < z.r + b.r) {
         hitZombie(z, j, b.dmg);
+        applyWeapon(z, b.x, b.y, b.dmg);   // 命中后追加武器化效果
         b.hit++;
         if (b.hit > b.pierce) { bullets.splice(i, 1); }
         break;
@@ -287,11 +308,80 @@ function tickBullets(dt) {
   }
 }
 
+/** 命中后按已点亮的武器等级追加结算：燃烧/爆炸溅射/闪电链 */
+function applyWeapon(target, ix, iy, bdmg) {
+  // 燃烧：给直接命中那只挂上持续掉血（高级覆盖低级）
+  if (player.burnTier > 0 && target.hp > 0) {
+    target.burnAmt = bdmg * (player.burnTier === 1 ? 0.20 : 0.35);
+    target.burnMs = Math.max(target.burnMs, player.burnTier === 1 ? 3000 : 4500);
+    if (target.burnCd <= 0) target.burnCd = 400;
+  }
+  // 爆炸：落点周围圆形溅射
+  if (player.splashTier > 0) {
+    const rad = player.splashTier === 1 ? 60 : 95, pct = player.splashTier === 1 ? 0.55 : 1.0;
+    burst(ix, iy, C.fire, player.splashTier === 1 ? 8 : 14);
+    for (let i = zombies.length - 1; i >= 0; i--) {
+      const t = zombies[i];
+      if (t === target) continue;
+      if (dist(ix, iy, t.x, t.y) < rad) hurtZombie(t, bdmg * pct);
+    }
+  }
+  // 闪电链：从直接命中那只开始，一环一环电到旁边的怪
+  if (player.chainTier > 0) {
+    const n = player.chainTier === 1 ? 2 : 4;
+    const pct = player.chainTier === 1 ? 0.50 : 0.75;
+    let sx = target.x, sy = target.y;
+    const linked = [target];
+    for (let k = 0; k < n; k++) {
+      const t = nearestZombieTo(sx, sy, linked);
+      if (!t) break;
+      zaps.push({ x1: sx, y1: sy, x2: t.x, y2: t.y, life: 180 });
+      hurtZombie(t, bdmg * pct);
+      linked.push(t);
+      sx = t.x; sy = t.y;
+    }
+  }
+}
+
+/** 找离 (x,y) 最近的僵尸；skip 数组里的跳过，没找到返回 null */
+function nearestZombieTo(x, y, skip) {
+  let best = null, bd = Infinity;
+  for (const z of zombies) {
+    if (skip && skip.includes(z)) continue;
+    const d = dist(x, y, z.x, z.y);
+    if (d < bd) { bd = d; best = z; }
+  }
+  return best;
+}
+
+/** 溅射/电链/燃烧这类次要伤害专用：自己查下标，死透就结算击杀 */
+function hurtZombie(z, d) {
+  if (z.hp <= 0) return;
+  z.hp -= d;
+  z.flash = 90;
+  floatUp(z.x, z.y - z.r, "-" + Math.round(d), [255, 255, 255], 11);
+  if (z.hp <= 0) {
+    const idx = zombies.indexOf(z);
+    if (idx >= 0) killZombie(z, idx);
+  }
+}
+
 function tickZombies(dt) {
   const slow = 1 - player.slowPct / 100;   // 减速光环全局系数
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
     if (z.flash > 0) z.flash -= dt;
+    // 燃烧结算：每 0.4 秒掉一口血，烧完为止（啃墙中也照烧）
+    if (z.burnMs > 0) {
+      z.burnMs -= dt;
+      z.burnCd -= dt;
+      if (z.burnCd <= 0) {
+        z.burnCd = 400;
+        burst(z.x, z.y, C.fire, 2);
+        hurtZombie(z, z.burnAmt);
+        if (z.hp <= 0) continue;   // 被烧死已从列表移除，跳过后续移动
+      }
+    }
     if (!z.attacking) {
       // 还在往下压
       z.y += z.spd * slow * dt / 1000;
@@ -384,6 +474,15 @@ const UPGRADES = [
   // 顶级组合
   { r: 4, title: "双管齐下", desc: "弹幕 +2 且攻速 +15%", apply: () => { player.shots += 2; player.fireInterval = Math.max(60, player.fireInterval * 0.87); } },
   { r: 5, title: "天基裁决", desc: "伤害 +120% 且穿透 +1", apply: () => { player.dmg *= 2.2; player.pierce += 1; } },
+  // 武器化：命中时额外触发的新机制，同机制取更高等级，不会叠加降档
+  { r: 1, title: "燃烧弹",   desc: "命中燃烧 3 秒·每口 20%",   apply: () => { player.burnTier = Math.max(player.burnTier, 1); } },
+  { r: 2, title: "凝固汽油弹", desc: "命中燃烧 4.5 秒·每口 35%", apply: () => { player.burnTier = Math.max(player.burnTier, 2); } },
+  { r: 2, title: "火箭弹",   desc: "命中爆炸·60px 溅射 55%",   apply: () => { player.splashTier = Math.max(player.splashTier, 1); } },
+  { r: 3, title: "重火箭",   desc: "命中爆炸·95px 溅射 100%",  apply: () => { player.splashTier = Math.max(player.splashTier, 2); } },
+  { r: 2, title: "特斯拉线圈", desc: "命中电链 2 个·50%",       apply: () => { player.chainTier = Math.max(player.chainTier, 1); } },
+  { r: 3, title: "雷霆链",   desc: "命中电链 4 个·75%",        apply: () => { player.chainTier = Math.max(player.chainTier, 2); } },
+  { r: 2, title: "追踪弹头", desc: "子弹轻微自动追踪",         apply: () => { player.homingTier = Math.max(player.homingTier, 1); } },
+  { r: 3, title: "捕食者导弹", desc: "子弹强力追踪",           apply: () => { player.homingTier = Math.max(player.homingTier, 2); } },
 ];
 
 function gainXp(n) {
@@ -460,6 +559,10 @@ function tickEffects(dt) {
   }
   if (player.flash > 0) player.flash -= dt;
   if (player.shake > 0) player.shake = Math.max(0, player.shake - dt / 40);
+  for (let i = zaps.length - 1; i >= 0; i--) {
+    zaps[i].life -= dt;
+    if (zaps[i].life <= 0) zaps.splice(i, 1);
+  }
 }
 
 
@@ -551,11 +654,12 @@ function startGame() {
   player.hp = player.maxHp = 100;
   player.dmg = 6; player.fireInterval = 320; player.bulletSpeed = 460;
   player.shots = 1; player.pierce = 0; player.slowPct = 0;
+  player.burnTier = player.splashTier = player.chainTier = player.homingTier = 0;
   player.xp = 0; player.level = 1; player.xpNext = 12;
   player.fireCd = 0; player.flash = 0; player.shake = 0;
 
   wave = 1; waveTimer = 0; spawnCd = 300; kills = 0; score = 0;
-  zombies.length = 0; bullets.length = 0; parts.length = 0; floaters.length = 0; cards.length = 0;
+  zombies.length = 0; bullets.length = 0; parts.length = 0; floaters.length = 0; zaps.length = 0; cards.length = 0;
 
   gameMs = 0;
   state = "playing";
@@ -698,6 +802,19 @@ function drawBullets() {
   g.shadowBlur = 0;
 }
 
+/** 闪电链电弧：一条渐渐淡掉的青蓝折线，中段抖一下更像放电 */
+function drawZaps() {
+  if (!zaps.length) return;
+  g.lineWidth = 2;
+  for (const p of zaps) {
+    g.strokeStyle = rgb(C.zap, clamp(p.life / 180, 0, 1));
+    const mx = (p.x1 + p.x2) / 2 + rand(-6, 6);
+    const my = (p.y1 + p.y2) / 2 + rand(-6, 6);
+    g.beginPath(); g.moveTo(p.x1, p.y1); g.lineTo(mx, my); g.lineTo(p.x2, p.y2); g.stroke();
+  }
+  g.lineWidth = 1;
+}
+
 function drawParts() {
   for (const p of parts) {
     g.fillStyle = rgb(p.col, clamp(p.life / p.max, 0, 1));
@@ -823,6 +940,7 @@ function draw() {
   drawParts();
   for (const z of zombies) drawZombie(z);
   drawBullets();
+  drawZaps();
   drawCannon();
   drawFloaters();
   drawHud();
